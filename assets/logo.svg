@@ -1,23 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-labelledby="wg-logo-title wg-logo-desc">
   <title id="wg-logo-title">workflow-gate</title>
-  <desc id="wg-logo-desc">A dark rounded square containing a white gate/arch glyph, with a green checkmark badge overlapping the bottom-right corner</desc>
+  <desc id="wg-logo-desc">A dark rounded square containing an abstracted striped barrier arm, pivoted on a hinge — the universal "stop until cleared" shape</desc>
   <defs>
-    <linearGradient id="wg-bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#241F3D"/>
-      <stop offset="100%" stop-color="#151322"/>
-    </linearGradient>
+    <clipPath id="wg-bar-clip">
+      <rect x="14" y="47" width="92" height="26" rx="13"/>
+    </clipPath>
   </defs>
 
-  <rect x="4" y="4" width="112" height="112" rx="26" fill="url(#wg-bg)" stroke="#D97757" stroke-width="1.5" stroke-opacity="0.55"/>
+  <rect x="4" y="4" width="112" height="112" rx="26" fill="#17151F"/>
 
-  <!-- gate / arch glyph: two posts + a lintel, the thing you must pass through -->
-  <g fill="none" stroke="#F5F3FF" stroke-width="10" stroke-linecap="round">
-    <path d="M38 84 V34" />
-    <path d="M82 84 V34" />
-    <path d="M38 34 H82" />
+  <g transform="rotate(-24 60 60)">
+    <g clip-path="url(#wg-bar-clip)">
+      <rect x="14" y="47" width="15" height="26" fill="#F5F1E8"/>
+      <rect x="29" y="47" width="15" height="26" fill="#D97757"/>
+      <rect x="44" y="47" width="15" height="26" fill="#F5F1E8"/>
+      <rect x="59" y="47" width="15" height="26" fill="#D97757"/>
+      <rect x="74" y="47" width="15" height="26" fill="#F5F1E8"/>
+      <rect x="89" y="47" width="17" height="26" fill="#D97757"/>
+    </g>
+    <circle cx="18" cy="60" r="12" fill="#D97757" stroke="#17151F" stroke-width="3"/>
+    <circle cx="18" cy="60" r="4" fill="#17151F"/>
   </g>
-
-  <!-- approval badge -->
-  <circle cx="86" cy="86" r="19" fill="#22C55E" stroke="#151322" stroke-width="3"/>
-  <path d="M78 86.5 L83.5 92 L94.5 79" fill="none" stroke="#0B1F14" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

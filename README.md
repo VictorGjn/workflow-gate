@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.svg" width="120" alt="workflow-gate logo — a gate glyph with an approval checkmark">
+  <img src="assets/logo.svg" width="120" alt="workflow-gate logo — a striped barrier arm on a hinge">
 
 # workflow-gate
 
@@ -18,7 +18,7 @@ Claude Code's native `Workflow` tool can fan out into a whole tree of sub-agents
 
 **`workflow-gate` answers both.** A `PreToolUse` hook blocks the launch until you approve the exact script, content-fingerprinted so an edit-and-rerun can't sneak through on a stale approval. And a bundled skill teaches Claude how to design the workflow itself so cost and access are deliberate, not accidental — which model tier does which job, which skills or MCP tools each agent actually gets, and what happens when an agent hits a capability gap it wasn't granted mid-run.
 
-The gate is the part you notice. **The governance is the part that actually saves money and closes the access-control gap most multi-agent setups leave wide open.**
+The gate is the part you notice first. The tiering and capability rules are what actually keep a run from quietly costing more, or touching more, than you meant.
 
 ## Why this exists
 
@@ -29,9 +29,9 @@ A multi-agent workflow is the highest-leverage, highest-blast-radius call in Cla
 
 `workflow-gate` closes the first gap with a content-fingerprinted approval. It closes the second with a skill that makes cost and capability decisions explicit *at design time*, plus a runtime protocol for the gaps that only show up once agents are actually running.
 
-## The moat: cost and capability governance
+## Cost and capability governance
 
-This is the part most approval hooks don't touch at all — they stop at "should this launch," and have nothing to say about what happens once it does.
+Most approval hooks stop at "should this launch" and have nothing to say about what happens once it does. This is the part that fills that gap.
 
 ### Cost control through model-tier selection
 
