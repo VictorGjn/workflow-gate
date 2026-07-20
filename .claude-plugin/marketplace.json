@@ -1,0 +1,28 @@
+{
+  "name": "victorgjn",
+  "owner": {
+    "name": "VictorGjn"
+  },
+  "metadata": {
+    "description": "Claude Code plugins",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "workflow-gate",
+      "source": "./plugin",
+      "description": "Requires a human-approved plan before Claude Code's Workflow tool runs, plus the workflow-orchestration-patterns skill for designing that plan.",
+      "version": "1.3.0",
+      "author": {
+        "name": "VictorGjn"
+      },
+      "category": "development",
+      "keywords": [
+        "workflow",
+        "multi-agent",
+        "cost-control",
+        "review-gate"
+      ]
+    }
+  ]
+}

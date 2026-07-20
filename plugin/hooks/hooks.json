@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/workflow-plan-gate.mjs", "pre-tool"],
+            "timeout": 10,
+            "statusMessage": "Checking workflow plan-gate..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/workflow-plan-gate.mjs", "session-start"],
+            "timeout": 10,
+            "statusMessage": "Loading workflow-gate banner..."
+          }
+        ]
+      }
+    ]
+  }
+}
