@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-labelledby="wg-logo-title wg-logo-desc">
+  <title id="wg-logo-title">workflow-gate</title>
+  <desc id="wg-logo-desc">A dark rounded square containing a white gate/arch glyph, with a green checkmark badge overlapping the bottom-right corner</desc>
+  <defs>
+    <linearGradient id="wg-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#241F3D"/>
+      <stop offset="100%" stop-color="#151322"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="112" height="112" rx="26" fill="url(#wg-bg)" stroke="#D97757" stroke-width="1.5" stroke-opacity="0.55"/>
+
+  <!-- gate / arch glyph: two posts + a lintel, the thing you must pass through -->
+  <g fill="none" stroke="#F5F3FF" stroke-width="10" stroke-linecap="round">
+    <path d="M38 84 V34" />
+    <path d="M82 84 V34" />
+    <path d="M38 34 H82" />
+  </g>
+
+  <!-- approval badge -->
+  <circle cx="86" cy="86" r="19" fill="#22C55E" stroke="#151322" stroke-width="3"/>
+  <path d="M78 86.5 L83.5 92 L94.5 79" fill="none" stroke="#0B1F14" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
