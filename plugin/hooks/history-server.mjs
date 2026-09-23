@@ -22,7 +22,7 @@
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, renameSync } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { listRuns, costRun, loadCache, saveCache, cachedCost, putCost, PRICES_AT, buildPriors, savePriors, scriptHash } from './cost.mjs';
@@ -116,6 +116,20 @@ function summarise(r) {
     resumed: cost ? cost.resumed : 0, unpriced: cost ? cost.unpriced : [], delivered: deliveredOf(cost) };
 }
 
+// A retried approved call carries only scriptPath: the text that ran is the one approved for that
+// path (the gate rewrites the call to it), taken from the baseline the approval wrote. Never the file
+// as it is now — it may have changed since the run. A baseline newer than the run describes a later
+// approval, so it says nothing about this one.
+const APPROVED_DIR = join(homedir(), '.claude', 'workflow-gate', 'approved');
+function approvedTextOf(rec) {
+  if (!rec?.scriptPath) return null;
+  try {
+    const b = JSON.parse(readFileSync(join(APPROVED_DIR, createHash('sha256').update(resolve(rec.scriptPath)).digest('hex').slice(0, 16) + '.json'), 'utf8'));
+    const ran = Date.parse(rec.timestamp || rec.startTime || '');
+    return typeof b.text === 'string' && !(Date.parse(b.ts) > ran) ? b.text : null;
+  } catch { return null; }
+}
+
 function describe(r) {
   const rec = readRecord(r);
   const live = !rec;
@@ -129,7 +143,7 @@ function describe(r) {
     durationMs: rec?.durationMs || null,
     agentCount: agents.length, doneCount: live ? shape.done : agents.filter((a) => /done|complete/.test(a.state || '')).length,
     defaultModel: rec?.defaultModel || null,
-    sh: scriptHash(rec?.script),          // which script text ran: the priors say when it is not this one
+    sh: scriptHash(rec?.script || approvedTextOf(rec)),   // which script text ran: the priors say when it is not this one
     recordTokens: rec?.totalTokens || null,
     outputs: rec ? outputsOf(rec).length : 0,
   };
@@ -154,8 +168,8 @@ async function costMissing(runs = null) {
       saveCache(cache);
     }
     writePriors(runs || listRuns());               // before judging: a slow Jev must not hold the priors back
-    await judgeMissing(runs || listRuns());
-    writePriors(runs || listRuns());
+    // Only when a judgment can happen: an awaited no-op still yields, and /runs would report costing:true.
+    if (outcomeOn() && Date.now() >= judgeOffUntil) { await judgeMissing(runs || listRuns()); writePriors(runs || listRuns()); }
   } catch { /* a viewer that cannot cost is still a viewer */ }
   finally { costing = false; }
 }

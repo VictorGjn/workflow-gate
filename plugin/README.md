@@ -77,7 +77,8 @@ is, how costly a wrong result would be, and, per agent, what its mission needs f
 (mechanical / judgment / synthesis). The header shows the first two; selecting an agent shows the
 suggested tier next to its `model` with an **apply** button that splices it into the script like any
 other edit. The tier policy (score band → `haiku` / `sonnet` / `opus`) is in `hooks/advise.mjs`, not
-in the model, and any answer under 0.5 confidence is dropped rather than shown. **Advice only:** it
+in the model. A tier answer under 0.5 confidence is shown as `?` (low confidence) rather than as a
+suggestion, and a downgrade on a workflow whose stakes are high or unknown needs 0.7. **Advice only:** it
 never approves or denies anything; the human still does. **Egress:** the skeleton the page extracted
 — workflow name, phases, one mission per agent (≤ 1500 chars each), never the whole file — is sent
 to `api.typesafe.ai` from the local server (the key never reaches the browser); the header says so
@@ -103,11 +104,12 @@ once and cached under the price table's date and the costing method, so either c
 instead of silently re-baselining. Those are **Anthropic first-party API rates — on a subscription
 this is the API-equivalent cost of the run, not your bill.**
 
-**There is deliberately no pre-run estimate.** It was measured and it does not hold: across those 21
-runs, dollars-per-*declared*-agent — the only quantity the gate knows before launching — spreads
+**There is deliberately no pre-run estimate.** It was measured and it does not hold: across the 21
+runs recorded when this was first measured (before the per-message dedup), dollars-per-*declared*-agent — the only quantity the gate knows before launching — spreads
 **184x** (one script declares 1 agent and launches 61). The least-bad predictor, dollars per model
-turn, still spreads 11.6x, and turn count is not knowable in advance. No script has ever been run
-twice, so there is no per-script prior either. What replaces it is exact rather than predicted: the
+turn, still spreads 11.6x, and turn count is not knowable in advance. Few scripts run twice
+unchanged, so a per-script prior is rare; the priors below are per workflow name and say how many
+runs used this exact script. What replaces an estimate is exact rather than predicted: the
 live view shows the bill climbing during the run, next to the p75 of past runs of the same workflow
 name, so "already $180 at twenty minutes" arrives while you can still act on it. Where such runs
 exist, the deny text and the editor header show their median, p75 and max, always with `n=` and the
