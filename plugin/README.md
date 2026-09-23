@@ -6,7 +6,7 @@ Blocks Claude Code's `Workflow` tool (the multi-agent orchestration tool) until 
 
 **Not at your desk.** The hook waits only while someone is on the page (first mouse move or key press = present). Untouched for 90 s, it denies with the chat path instead: you say "approved" in chat, the agent runs `approve-path` against the file and retries.
 
-**Override, in your own words.** Type **"override manual approval"** in chat at any moment (optionally "for 2h"; default 8 h) and the gate lifts for that session — a `UserPromptSubmit` hook in the plugin reads the prompt itself, so there is no command for the agent to run, forget or refuse. **"restore manual approval"** puts it back. Every Workflow call that passes under an override says so in a systemMessage, and the SessionStart banner repeats it, so a forgotten override is never silent; a chat override is scoped to the session that said it and expires on its own. `node hooks/workflow-plan-gate.mjs override 2h` / `off` is the same thing from a terminal, global to the machine.
+**Override, in your own words.** Type **"override manual approval"** as its own chat message (or its first line) at any moment (optionally "for 2h"; default 8 h) and the gate lifts for that session — a `UserPromptSubmit` hook in the plugin reads the prompt itself, so there is no command for the agent to run, forget or refuse. **"restore manual approval"** puts it back. Every Workflow call that passes under an override says so in a systemMessage, and the SessionStart banner repeats it, so a forgotten override is never silent; a chat override is scoped to the session that said it and expires on its own. `node hooks/workflow-plan-gate.mjs override 2h` / `off` is the same thing from a terminal, global to the machine.
 
 **The graph editor.** A small local approval server (detached, loopback-only, single-use nonce in
 the URL) serves a **flowchart** of the script, not a lane diagram: `start` → one node per `agent()`
@@ -63,7 +63,7 @@ guess may be wrong, it must never look like a fact. No Stop button: stopping a w
 Code's to do, and `/workflows` in the terminal remains the way to do it. When the run record lands
 the page switches over to it, for the exact labels and token counts. The approval itself is
 unchanged and still single-use — from the moment Approve is pressed every POST answers 409, the
-server serves four read-only routes and nothing else, and it exits a minute after the run record
+server serves six read-only routes and nothing else, and it exits a minute after the run record
 appears or five minutes after the last poll, whichever comes first.
 
 **After a run.** If this exact script has already run, a *Show last run* button paints Claude Code's
@@ -90,14 +90,16 @@ workflow run this machine has — across every project and session, finished and
 what each one actually cost and room to say how it went. It is a separate daemon from the gate on
 purpose: the gate's whole job is to not fail open, and it must not share a process with a cost cache
 that walks 200 MB of transcripts. **The viewer cannot approve anything** — no `/approve` route, no
-fingerprint writing; the only thing it writes is your own notes.
+fingerprint writing; it writes your own notes, its cost cache, and the priors index above (numbers only).
 
 **Cost is measured, not estimated.** The run record's `tokens` is the agent's *final context size*,
-not spend: summed over the 21 runs recorded on the author's machine it reads 41 M tokens where 3.37
-**billion** were actually billed — 81x more, because almost all of it is cache reads the record never
+not spend: summed over the 15 runs recorded on the author's machine it reads 91 M tokens where 1.91
+**billion** were actually billed — 21x more, because almost all of it is cache reads the record never
 mentions. So costing reads `message.usage` out of each transcript and prices input, cache write
 (1.25x input), cache read (0.1x input, or a published rate where one exists) and output separately.
-Completed runs are costed once and cached under the price table's date, so a price change re-costs
+Each message is counted once, by `message.id`: Claude Code repeats a message's usage on every content
+block's line, and summing per line had overcounted the same history 2.2x. Completed runs are costed
+once and cached under the price table's date and the costing method, so either change re-costs
 instead of silently re-baselining. Those are **Anthropic first-party API rates — on a subscription
 this is the API-equivalent cost of the run, not your bill.**
 
@@ -106,12 +108,27 @@ runs, dollars-per-*declared*-agent — the only quantity the gate knows before l
 **184x** (one script declares 1 agent and launches 61). The least-bad predictor, dollars per model
 turn, still spreads 11.6x, and turn count is not knowable in advance. No script has ever been run
 twice, so there is no per-script prior either. What replaces it is exact rather than predicted: the
-live view shows the bill climbing during the run, next to the distribution of past runs (median,
-p75, max), so "already $180 at twenty minutes" arrives while you can still act on it.
+live view shows the bill climbing during the run, next to the p75 of past runs of the same workflow
+name, so "already $180 at twenty minutes" arrives while you can still act on it. Where such runs
+exist, the deny text and the editor header show their median, p75 and max, always with `n=` and the
+date span, and say when none of them ran this exact script; selecting an agent shows its call site's
+median per agent. These come from a small index the history viewer writes after each costing pass
+(`~/.claude/workflow-gate-priors.json`), so the gate never walks a transcript. No history, nothing
+shown.
 
 The gate's footer carries a **History & cost** link whenever the viewer is running, so the two
 reach each other; they stay separate pages on separate ports, which is what keeps a cost cache out
 of the process whose job is to not fail open.
+
+**Did the spend deliver? (opt-in).** With `TYPESAFE_API_KEY` **and** `WORKFLOW_GATE_OUTCOME=1` in the
+viewer's environment, each completed run is judged once after it is costed — every completed run the
+machine has, including those from before the switch was turned on: Jev answers one yes/no per
+agent — does the result substantively satisfy the mission, not a refusal, an error or an empty claim —
+on the mission and the first 1.5 KB of the result. The thresholds are in `hooks/advise.mjs`: PASS at
+0.8 or above, FAIL under 0.5, REVIEW between. The run's panel shows `k/n agents delivered` and the
+cost per delivered agent, and FAIL agents are left out of the per-call-site medians the gate shows.
+**Egress:** result excerpts leave the machine, which the advice call never sends — hence the second
+switch. A FAIL is a flag to go and read the result, not ground truth.
 
 **Notes are keyed on the label, not the agent id.** An agent id is a random hex string that means
 nothing six weeks later and differs on every re-run; a label names the call site, which is the prompt

@@ -12,6 +12,17 @@
             "statusMessage": "Workflow plan-gate: waiting for your decision in the browser (Approve & run, or Cancel)…"
           }
         ]
+      },
+      {
+        "matcher": "CronCreate|ScheduleWakeup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/workflow-plan-gate.mjs", "schedule-guard"],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

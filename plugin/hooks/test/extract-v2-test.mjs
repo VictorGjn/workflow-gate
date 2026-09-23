@@ -14,7 +14,7 @@ const EDITOR = process.argv[2] || fileURLToPath(new URL('../graph-editor.html', 
 const html = readFileSync(EDITOR, 'utf8');
 const body = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
 const pure = body.slice(0, body.indexOf('// ---------------------------------------------------------------- state'));
-const { extract } = new Function('acorn', pure + '\n return { extract };')(acorn);
+const { extract, lineOf } = new Function('acorn', pure + '\n return { extract, lineOf };')(acorn);
 
 let pass = 0, fail = 0;
 const check = (n, ok, d = '') => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? ' — ' + d : ''}`); };
@@ -156,6 +156,19 @@ check('opaque node counts ≥1 but is flagged', wf.minAgents >= 2 && wf.flags.ne
   const pl = extract(`await pipeline(items, (c) => agent('research'), (b, c) => b ? agent('verify') : null)`).flow;
   const d3 = pl.nodes.find((n) => n.kind === 'decision');
   check('flow: pipeline stage order, ternary stage is a decision', d3 && fe(pl, 'a0', d3.id) && fe(pl, d3.id, 'a1')?.label === 'yes' && fe(pl, d3.id, 'end')?.label === 'no', j(pl.edges));
+}
+
+// ---- lineOf: the binary search must agree with the old slice-and-split at every offset --------
+{
+  const old = (src, i) => src.slice(0, i).split('\n').length;
+  let bad = [];
+  for (const src of ['', 'x', '\n', 'a\nb', '\n\n\n', 'a\r\nb\r\n', 'one\ntwo\n\nfour\n', real]) {
+    for (let i = 0; i <= src.length; i++) if (lineOf(src, i) !== old(src, i)) { bad.push([JSON.stringify(src.slice(0, 20)), i]); break; }
+  }
+  // interleaved sources: the per-source index must not leak from one to the other
+  const A = 'a\nb\nc', B = 'x\n\n\n\ny';
+  if (lineOf(A, 4) !== 3 || lineOf(B, 4) !== 4 || lineOf(A, 2) !== 2) bad.push(['interleaved', 0]);
+  check('lineOf agrees with slice-and-split everywhere (incl. CRLF, end, interleaved sources)', !bad.length, j(bad));
 }
 
 console.log(`\n${fail === 0 ? 'EXTRACT V2 PASSED' : 'EXTRACT V2 FAILED'} — ${pass} pass, ${fail} fail`);

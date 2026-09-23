@@ -54,8 +54,20 @@ writeFileSync(join(liveDir, 'journal.jsonl'),
   + line({ type: 'started', key: 'v2:b', agentId: 'L2' })
   + line({ type: 'result', key: 'v2:a', agentId: 'L1', result: { ok: true } }));
 
+// ---- a run the opt-in outcome check (G10) already judged: its verdicts sit in the cost cache ------
+{
+  const { PRICES_AT, COST_SCHEME } = await import('../cost.mjs');
+  const jd = join(SUB, 'wf_judged004-ddd');
+  mkdirSync(jd, { recursive: true });
+  writeFileSync(join(WF, 'wf_judged004-ddd.json'), JSON.stringify({ runId: 'wf_judged004-ddd', workflowName: 'judged-fixture', status: 'completed',
+    timestamp: Date.now() - 1000, workflowProgress: [{ type: 'workflow_agent', agentId: 'j1', label: 'draft' }, { type: 'workflow_agent', agentId: 'j2', label: 'draft' }] }));
+  writeFileSync(join(T, '.claude', 'workflow-gate-cost-cache.json'), JSON.stringify({ 'wf_judged004-ddd': {
+    pricesAt: PRICES_AT, scheme: COST_SCHEME, at: 1, total: 3, usage: {}, resumed: 0, unpriced: [], outcome: { at: 1 },
+    agents: [{ label: 'draft', cost: 1, outcome: 'PASS', turns: 1 }, { label: 'draft', cost: 2, outcome: 'FAIL', turns: 1 }] } }));
+}
+
 // ---- the daemon --------------------------------------------------------------------------------
-const env = { ...process.env, HOME: T, USERPROFILE: T };
+const env = { ...process.env, HOME: T, USERPROFILE: T, WORKFLOW_GATE_OUTCOME: '' };   // never send fixtures to Jev
 const srv = spawn(process.execPath, [join(HOOKS, 'history-server.mjs')], { env, stdio: 'ignore' });
 srv.unref();
 
@@ -88,12 +100,52 @@ try {
   check('the run with no record is marked live', live.live === true && done.live === false);
   check('a completed run is costed from its transcripts', Math.abs(done.cost - 0.4) < 1e-9, '$' + done.cost);
   check('record tokens are carried but NOT used as cost', done.recordTokens === 4242 && done.cost !== 4242);
+  const jr = d.runs.find((r) => r.runId === 'wf_judged004-ddd');
+  check('a judged run says how many agents delivered and what each cost', jr?.delivered?.pass === 1 && jr.delivered.judged === 2
+    && jr.delivered.fail === 1 && jr.delivered.costPerPass === 3, JSON.stringify(jr?.delivered));
+  check('the outcome check is off by default: an unjudged run has no verdict', done.delivered === null);
+  // The approval screen's past-spend line: precomputed here, read by the gate without a transcript.
+  const { priorsFor } = await import('../cost.mjs');
+  let pri = null;
+  for (let i = 0; i < 20 && !pri; i++) { try { pri = priorsFor('finished-fixture', null, JSON.parse(readFileSync(join(T, '.claude', 'workflow-gate-priors.json'), 'utf8'))); } catch {} if (!pri) await sleep(100); }
+  const jpri = priorsFor('judged-fixture', null, JSON.parse(readFileSync(join(T, '.claude', 'workflow-gate-priors.json'), 'utf8')));
+  check('a FAIL-judged agent stays out of the priors medians', jpri?.sites.draft?.n === 1 && jpri.sites.draft.median === 1 && jpri.median === 3, JSON.stringify(jpri));
+  check('the daemon writes a priors index the gate can read', pri?.n === 1 && Math.abs(pri.median - 0.4) < 1e-9 && pri.sites.scan?.n === 2, JSON.stringify(pri));
 
   // The point of the live half: a number while it can still change your mind.
   check('a LIVE run is costed too, with the model read off its transcripts',
     Math.abs(live.cost - 0.2) < 1e-9, '$' + live.cost);
   check('live progress comes from the journal, not from a record',
     live.doneCount === 1 && live.agentCount === 2, `${live.doneCount}/${live.agentCount}`);
+
+  // ---- the 2.5 s poll: unchanged answers 304, and the memo never freezes a cost ------------------
+  let etag = null, st304 = 0;
+  for (let i = 0; i < 3 && st304 !== 304; i++) {        // a background costing pass can still flip `costing`
+    const r = await fetch(q('/runs'), { headers: etag ? { 'if-none-match': etag } : {} });
+    st304 = r.status; etag = r.headers.get('etag') || etag;
+  }
+  check('an unchanged /runs answers 304 to its own ETag', st304 === 304 && !!etag, `${st304} ${etag}`);
+  // A completed run that appears AFTER the daemon started: its first summary is memoized while it is
+  // still uncosted. The cost must still arrive on a later poll, or the page polls forever.
+  const lateDir = join(SUB, 'wf_late0003-ccc');
+  mkdirSync(lateDir, { recursive: true });
+  writeFileSync(join(lateDir, 'agent-z1.jsonl'), turn('claude-sonnet-5', usage(0, 0, 1e6, 0)));   // $0.20
+  writeFileSync(join(WF, 'wf_late0003-ccc.json'), JSON.stringify({ runId: 'wf_late0003-ccc', workflowName: 'late', status: 'completed',
+    timestamp: Date.now(), workflowProgress: [{ type: 'workflow_agent', index: 1, agentId: 'z1', label: 'z', model: 'claude-sonnet-5', state: 'done' }] }));
+  const firstLate = (await fetch(q('/runs')).then((r) => r.json())).runs.find((r) => r.runId === 'wf_late0003-ccc');
+  let late = null;
+  for (let i = 0; i < 40; i++) {
+    late = (await fetch(q('/runs')).then((r) => r.json())).runs.find((r) => r.runId === 'wf_late0003-ccc');
+    if (late?.cost != null) break;
+    await sleep(150);
+  }
+  check('a run first summarised uncosted still gets its cost on a later poll',
+    firstLate?.cost == null && Math.abs(late?.cost - 0.2) < 1e-9, `${firstLate?.cost} -> ${late?.cost}`);
+  // A rewritten record is re-read, not served from the memo.
+  writeFileSync(join(WF, 'wf_late0003-ccc.json'), JSON.stringify({ runId: 'wf_late0003-ccc', workflowName: 'late-renamed', status: 'completed',
+    timestamp: Date.now(), workflowProgress: [{ type: 'workflow_agent', index: 1, agentId: 'z1', label: 'z', model: 'claude-sonnet-5', state: 'done' }] }));
+  const renamed = (await fetch(q('/runs')).then((r) => r.json())).runs.find((r) => r.runId === 'wf_late0003-ccc');
+  check('a rewritten record is re-summarised', renamed?.name === 'late-renamed', String(renamed?.name));
 
   // ---- detail: labels, outputs, and the live re-costing -----------------------------------------
   const det = await fetch(q('/run?id=wf_done0001-aaa')).then((r) => r.json());

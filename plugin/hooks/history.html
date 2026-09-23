@@ -131,10 +131,14 @@ const usd = (n) => (n == null ? '—' : '$' + (n >= 100 ? Math.round(n) : n.toFi
 const tok = (n) => (n == null ? '—' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' B' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n));
 const when = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
-let RUNS = [], NOTES = {}, SEL = null, DETAIL = null, TIMER = null;
+let RUNS = [], NOTES = {}, SEL = null, DETAIL = null, TIMER = null, ETAG = null, LAST = null;
 
 async function loadList() {
-  const d = await fetch(q('/runs')).then((r) => r.json());
+  const res = await fetch(q('/runs'), { cache: 'no-store', headers: ETAG ? { 'if-none-match': ETAG } : {} });
+  // 304: nothing changed since the last poll. Keep the picture, keep polling on its last state.
+  if (res.status === 304 && LAST) { clearTimeout(TIMER); if (LAST.pending || LAST.runs.some((r) => r.live)) TIMER = setTimeout(loadList, 2500); return; }
+  const d = await res.json();
+  ETAG = res.headers.get('etag'); LAST = d;
   RUNS = d.runs; NOTES = d.notes || {};
   const priced = RUNS.filter((r) => r.cost != null);
   const total = priced.reduce((s, r) => s + r.cost, 0);
@@ -203,6 +207,8 @@ function renderPanel() {
         <dt>billed tokens</dt><dd>${tok(billed)} ${u ? `<span class="dim">· ${tok(u.cr)} of it cache reads</span>` : ''}</dd>
         <dt>record says</dt><dd>${tok(d.recordTokens)} <span class="dim">— final context size, not spend</span></dd>
         <dt>agents</dt><dd>${d.doneCount}/${d.agentCount}${d.phases?.length ? ` · ${esc(d.phases.join(' → '))}` : ''}</dd>
+        ${d.delivered ? `<dt>delivered</dt><dd><b>${d.delivered.pass}/${d.delivered.judged}</b> agents${d.delivered.costPerPass != null ? ` · ${usd(d.delivered.costPerPass)} per delivered agent` : ''}${d.delivered.fail ? ` · ${d.delivered.fail} FAIL` : ''}${d.delivered.review ? ` · ${d.delivered.review} to review` : ''}
+          <small class="dim">judged by Jev on each mission and the first 1.5 KB of its result — a flag, not ground truth</small></dd>` : ''}
         <dt>duration</dt><dd>${d.durationMs ? Math.round(d.durationMs / 60000) + ' min' : '—'} · ${esc(d.status)}</dd>
         <dt>session</dt><dd class="path">${esc(d.project)} / ${esc(d.session)}</dd>
       </dl>
@@ -213,7 +219,7 @@ function renderPanel() {
     <section>
       <h2>Where the money went <span class="dim">${sites.length} label${sites.length === 1 ? '' : 's'}</span></h2>
       <ul class="plain">${sites.map((s) => `<li>
-        <span>${esc(s.label)}<small>${esc(s.model || 'model unrecorded')} · ${s.n} agent${s.n === 1 ? '' : 's'} · ${s.turns} turns${s.resumed ? ` · ${s.resumed} resumed` : ''}</small></span>
+        <span>${esc(s.label)}<small>${esc(s.model || 'model unrecorded')} · ${s.n} agent${s.n === 1 ? '' : 's'} · ${s.turns} turns${s.resumed ? ` · ${s.resumed} resumed` : ''}${s.fail ? ` · ${s.fail} judged FAIL` : ''}</small></span>
         <span class="num mono">${usd(s.cost)}<small>${Math.round((s.cost / top) * 100)}%</small></span></li>`).join('') || '<li class="dim">not costed yet</li>'}</ul>
     </section>
 

@@ -3,14 +3,14 @@
 //
 // The money path. Two things make this worth a test rather than a glance:
 //  · the run record's `tokens` is the agent's FINAL CONTEXT SIZE, not spend — costing from it is
-//    wrong by ~81x on this machine's own history, so the arithmetic must come from message.usage;
+//    wrong by ~21x on this machine's own history, so the arithmetic must come from message.usage;
 //  · cache reads are ~90% of every real run's token volume and are billed at a tenth of input
 //    (a published quarter-dollar on Fable 5.1), so a wrong multiplier silently moves the total by
 //    an order of magnitude in either direction.
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { costOf, priceOf, usageOfTranscript, costRun, emptyUsage, cachedCost, putCost, PRICES_AT } from '../cost.mjs';
+import { costOf, priceOf, usageOfTranscript, costRun, emptyUsage, cachedCost, putCost, PRICES_AT, COST_SCHEME, buildPriors, priorsFor, scriptHash } from '../cost.mjs';
 
 let pass = 0, fail = 0;
 const check = (n, ok, d = '') => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? ' — ' + d : ''}`); };
@@ -84,6 +84,27 @@ check('once complete, the record is counted exactly once',
 check('and the offset is now the whole file',
   st.offset === Buffer.byteLength(oneTurn + nextTurn, 'utf8'), String(st.offset));
 
+// ---- one message, many lines ------------------------------------------------------------------
+// Claude Code writes a line per content block and repeats the message's usage on each, output growing
+// as it streams. Summed per line, one message was billed 6 times. Counted once, at its LAST line.
+const msg = (id, o) => line({ type: 'assistant', message: { id, role: 'assistant', model: 'claude-sonnet-5', usage: usage(5, 100, 1000, o) } });
+const dup = join(T, 'agent-dup.jsonl');
+writeFileSync(dup, msg('msg_A', 8) + msg('msg_A', 50) + msg('msg_A', 112)
+  + line({ type: 'assistant', message: { role: 'assistant', model: 'claude-sonnet-5', usage: usage(1, 0, 0, 1) } }));   // no id
+const d = await usageOfTranscript(dup);
+check('a message id on 3 lines is one turn, costed at its last line',
+  d.turns === 2 && d.in === 6 && d.cw === 100 && d.cr === 1000 && d.out === 113, JSON.stringify(d));
+
+// The same message straddling two polls: the second poll returns only the delta, and no new turn.
+const split = join(T, 'agent-split.jsonl');
+writeFileSync(split, msg('msg_B', 8));
+const sst = { offset: 0 };
+const s1 = await usageOfTranscript(split, sst);
+appendFileSync(split, msg('msg_B', 112));
+const s2 = await usageOfTranscript(split, sst);
+check('a message split across polls adds only its growth, not a second copy',
+  s1.turns === 1 && s2.turns === 0 && s2.in === 0 && s2.cr === 0 && s2.out === 104, JSON.stringify(s2));
+
 // ---- per-run costing -------------------------------------------------------------------------
 writeFileSync(join(T, 'agent-a2.jsonl'),
   line({ type: 'assistant', message: { role: 'assistant', model: 'claude-haiku-4-5', usage: usage(0, 0, 1e6, 0) } }));
@@ -114,6 +135,35 @@ putCost(c, 'wf_x', run);
 check('a cached figure is returned under the same price table', cachedCost(c, 'wf_x')?.total === run.total);
 c.wf_x.pricesAt = '1999-01-01';
 check('a figure costed under different prices is NOT reused', cachedCost(c, 'wf_x') === null, 'stamped ' + PRICES_AT);
+putCost(c, 'wf_y', run);
+delete c.wf_y.scheme;                                 // cached before message.id dedupe existed
+check('a figure costed under an older method is NOT reused', cachedCost(c, 'wf_y') === null, 'scheme ' + COST_SCHEME);
+
+// ---- priors: what the approval screen shows as past spend ------------------------------------
+const ag = (label, cost, extra = {}) => ({ label, cost, resumed: false, ...extra });
+const rows = [1, 2, 3, 4].map((t) => ({ name: 'nightly', status: 'completed', when: t * 1e12, sh: t === 4 ? scriptHash('v2') : scriptHash('v1'),
+  cost: { total: t, agents: [ag('scan', t / 2), ag('scan', 0, { resumed: true }), ag('write', null)] } }));
+rows.push({ name: 'nightly', status: 'failed', when: 9e12, sh: null, cost: { total: 100, agents: [] } });
+const idx = buildPriors(rows);
+const pr = priorsFor('nightly', 'v2', idx);
+check('priors: median, p75, max and n over completed runs only (history.html method)',
+  pr.n === 4 && pr.median === 3 && pr.p75 === 4 && pr.max === 4 && pr.from === 1e12 && pr.to === 4e12, JSON.stringify(pr));
+check('priors: runs of this exact script are counted apart', pr.exact === 1 && priorsFor('nightly', 'v3', idx).exact === 0);
+check('priors: resumed ($0) and unpriced agents stay out of the per-label median',
+  pr.sites.scan.n === 4 && pr.sites.scan.median === 1.5 && !Object.hasOwn(pr.sites, 'write'), JSON.stringify(pr.sites));
+idx.names.nightly[0].agents[0].outcome = 'FAIL';      // the newest run's scan agent, $2
+check('priors: a FAIL-judged agent is left out of its label median', priorsFor('nightly', null, idx).sites.scan.n === 3);
+const mk = (models) => ({ names: { w: [{ when: 1, total: 1, agents: models.map((m) => ({ label: 's', model: m, cost: 1 })) }] } });
+check('priors: a site names the one model it was measured on, and only a model-shaped one',
+  priorsFor('w', null, mk(['claude-opus-5[1m]'])).sites.s.model === 'claude-opus-5[1m]'
+  && priorsFor('w', null, mk(['claude-opus-5', 'claude-haiku-4-5'])).sites.s.model === null
+  && priorsFor('w', null, mk(['<img src=x onerror=alert(1)>'])).sites.s.model === null);
+check('priors: no history is null, not zeros', priorsFor('weekly', null, idx) === null && priorsFor('nightly', null, { names: {} }) === null);
+check('priors: a hostile index is null or filtered, never a throw',
+  priorsFor('__proto__', null, idx) === null && priorsFor('toString', null, idx) === null
+  && priorsFor('nightly', null, { names: { nightly: { length: 1e9 } } }) === null
+  && priorsFor('nightly', null, { names: { nightly: [{ total: '1; rm -rf', when: 1 }] } }) === null
+  && priorsFor('nightly', null, null) === null && priorsFor('nightly', null, 'x') === null);
 
 rmSync(T, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

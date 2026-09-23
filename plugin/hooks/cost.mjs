@@ -1,18 +1,20 @@
 // What a workflow run actually cost, from the only place that knows: the transcripts.
 //
-// The run record's `tokens` is NOT spend — it is the agent's final context size. Measured on the 21
-// recorded runs here: the record totals 41 M tokens where 3.37 BILLION were actually billed, 81x
+// The run record's `tokens` is NOT spend — it is the agent's final context size. Measured on the 15
+// recorded runs here: the record totals 91 M tokens where 1.91 BILLION were actually billed, 21x
 // more, because almost all of it is cache reads the record never mentions. Costing from
-// `totalTokens` is wrong by an order of magnitude, so this reads `message.usage` per transcript
-// line instead: input, cache write, cache read, output, each priced separately.
+// `totalTokens` is wrong by an order of magnitude, so this reads `message.usage` per message
+// instead: input, cache write, cache read, output, each priced separately.
 //
-// ponytail: zero dependencies, one JSON cache, no index. A completed run's transcripts never change,
-// so it is costed once and remembered; only in-progress runs are re-read.
+// ponytail: zero dependencies, one JSON cache, no database. A completed run's transcripts never change,
+// so it is costed once and remembered; only in-progress runs are re-read. The one index (priors, at
+// the end) is derived from that cache, for the approval screen.
 
 import { readdirSync, readFileSync, writeFileSync, statSync, createReadStream, renameSync, openSync, readSync, closeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 // Anthropic first-party $/MTok — input, output, and the published cache-read rate where one exists
 // (otherwise cache read is 0.1x input, cache write 1.25x input). SUBSCRIPTION USERS: this is the
@@ -56,6 +58,32 @@ export function addUsage(a, b) {
   return a;
 }
 
+// Bump when the way a transcript is costed changes: stamped with every cached figure next to
+// PRICES_AT, so figures from the old method are re-costed rather than served. 2: dedupe by message.id.
+export const COST_SCHEME = 2;
+
+// Claude Code writes one transcript line per content block and repeats the whole message's usage on
+// each, output_tokens growing as it streams (measured here: 22.5 k repeats over 17.5 k messages, output
+// never shrinking). Summing per line overcounted spend, x6 on one sampled message. So each message.id
+// counts once, at its LAST line: a repeat swaps out what its earlier line contributed, which keeps an
+// incremental read's delta right too. `seen` maps id -> that contribution. No id: its own message.
+// Shared by usageOfTranscript and the gate's live view (approve-server liveRun).
+export function addEntry(u, e, seen) {
+  const x = e?.message?.usage;
+  if (!x) return false;
+  const v = { in: x.input_tokens || 0, cw: x.cache_creation_input_tokens || 0,
+    cr: x.cache_read_input_tokens || 0, out: x.output_tokens || 0 };
+  const id = e.message.id;
+  const prev = id ? seen.get(id) : null;
+  for (const k of ['in', 'cw', 'cr', 'out']) u[k] += v[k] - (prev ? prev[k] : 0);
+  if (!prev) u.turns++;
+  if (id) seen.set(id, v);
+  // A run still in flight has no record, so no model is known for it — but every assistant line
+  // names the model that produced it. That is the only way live cost is anything but zero.
+  if (!u.model && e.message.model) u.model = e.message.model;
+  return true;
+}
+
 // One transcript's billable usage. Reads FORWARD ONLY from `state.offset` when a state object is
 // given, so a run still in flight costs its new bytes per poll instead of its whole history: a
 // 60-agent run is 200 MB, and re-reading that every 2.5 seconds is not a viewer, it is a disk
@@ -64,6 +92,8 @@ export async function usageOfTranscript(file, state = null) {
   const u = emptyUsage();
   let size; try { size = statSync(file).size; } catch { return u; }
   const start = state ? Math.min(state.offset || 0, size) : 0;
+  // On the state, not per call: one message's lines can straddle two polls.
+  const seen = state ? (state.seen ||= new Map()) : new Map();
   if (size <= start) return u;
   // readline hands back a trailing fragment as if it were a line. Counting it would advance the
   // offset past a record that is still being written, and its tokens would never be counted once it
@@ -83,16 +113,7 @@ export async function usageOfTranscript(file, state = null) {
     consumed += Buffer.byteLength(line, 'utf8') + 1;      // the newline this line was split on
     if (!line || line.indexOf('"usage"') < 0) return;        // cheap reject before the JSON parse
     let e; try { e = JSON.parse(line); } catch { return; }
-    const x = e?.message?.usage;
-    if (!x) return;
-    u.in += x.input_tokens || 0;
-    u.cw += x.cache_creation_input_tokens || 0;
-    u.cr += x.cache_read_input_tokens || 0;
-    u.out += x.output_tokens || 0;
-    u.turns++;
-    // A run still in flight has no record, so no model is known for it — but every assistant line
-    // names the model that produced it. That is the only way live cost is anything but zero.
-    if (!u.model && e.message.model) u.model = e.message.model;
+    addEntry(u, e, seen);
   };
   for await (const line of rl) {
     if (held !== null) take(held);
@@ -157,12 +178,12 @@ export function saveCache(cache) {
 
 export function cachedCost(cache, runId) {
   const e = cache[runId];
-  return e && e.pricesAt === PRICES_AT ? e : null;
+  return e && e.pricesAt === PRICES_AT && e.scheme === COST_SCHEME ? e : null;
 }
 
 export function putCost(cache, runId, costed, extra = {}) {
   cache[runId] = {
-    pricesAt: PRICES_AT, at: Date.now(), total: costed.total, usage: costed.usage,
+    pricesAt: PRICES_AT, scheme: COST_SCHEME, at: Date.now(), total: costed.total, usage: costed.usage,
     resumed: costed.resumed, unpriced: costed.unpriced,
     agents: costed.agents.map((a) => ({ label: a.label, model: a.model, cost: a.cost, resumed: a.resumed, turns: a.usage.turns })),
     ...extra,
@@ -181,9 +202,9 @@ export function listRuns() {
     for (const f of ls(wdir)) {
       if (!/^wf_.*\.json$/.test(f)) continue;
       const id = f.replace(/\.json$/, '');
-      let t; try { t = statSync(join(wdir, f)).mtimeMs; } catch { continue; }
+      let t; try { t = statSync(join(wdir, f)); } catch { continue; }
       out.push({ runId: id, record: join(wdir, f), dir: join(R, proj, sess, 'subagents', 'workflows', id),
-        project: proj, session: sess, mtime: t, live: false });
+        project: proj, session: sess, mtime: t.mtimeMs, size: t.size, live: false });
     }
   }
   // A run directory with no record yet is a run still going — in ANY session, which is the point.
@@ -196,4 +217,70 @@ export function listRuns() {
     }
   }
   return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+// ---------------------------------------------------------------------------- priors
+// What past runs of a workflow cost, for the approval screen. The history daemon writes this small
+// index after each costing pass; the gate and the editor only ever READ it, so neither walks a
+// transcript. The file is under ~/.claude, which the agent being gated can write: priorsFor hands
+// back numbers only, and a label or name from the file is a lookup key, never echoed.
+const PRIORS = join(homedir(), '.claude', 'workflow-gate-priors.json');
+const PRIORS_RUNS = 50;                   // per workflow name, newest first
+export const scriptHash = (s) => (s ? createHash('sha256').update(String(s).replace(/\r\n/g, '\n').trim()).digest('hex').slice(0, 16) : null);
+
+// Same method as history.html's header, so the two pages never disagree on a p75.
+const pct = (xs, p) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
+
+// rows: [{ name, when (ms), sh, status, cost: a cachedCost entry }]. Only completed runs: a run
+// killed at minute two says nothing about what a full one costs. Resumed ($0) and unpriced agents
+// are left out of the per-label figures, which they would drag toward zero.
+export function buildPriors(rows) {
+  const names = Object.create(null);
+  for (const r of rows) {
+    if (!r.name || r.status !== 'completed' || !Number.isFinite(r.cost?.total) || !Number.isFinite(r.when)) continue;
+    const agents = (r.cost.agents || []).filter((a) => !a.resumed && Number.isFinite(a.cost))
+      .map((a) => ({ label: a.label, model: a.model, cost: a.cost, ...(a.outcome ? { outcome: a.outcome } : {}) }));
+    (names[r.name] ||= []).push({ when: r.when, total: r.cost.total, sh: r.sh || null, agents });
+  }
+  for (const k in names) names[k] = names[k].sort((a, b) => b.when - a.when).slice(0, PRIORS_RUNS);
+  return { at: Date.now(), names };
+}
+
+export function savePriors(p) {
+  try {
+    const tmp = PRIORS + '.' + process.pid + '.tmp';
+    writeFileSync(tmp, JSON.stringify(p));
+    renameSync(tmp, PRIORS);
+  } catch { /* no priors is an empty line on the approval screen, not an error */ }
+}
+
+// null when there is no history for this name — the caller then shows nothing at all. `exact` counts
+// runs of this very script text: names drift across versions, so 0 there means "another population".
+// FAIL-judged agents (G10 outcome check) are left out of the per-label medians: a cheap failure is not
+// a cheap success. Total by construction: any surprise in the file is null, never a throw, because
+// the gate calls this on its deny path.
+export function priorsFor(name, script = null, index) {
+  try {
+    if (index === undefined) { try { index = JSON.parse(readFileSync(PRIORS, 'utf8')); } catch { return null; } }
+    const names = index?.names;
+    if (typeof name !== 'string' || !names || typeof names !== 'object' || !Object.hasOwn(names, name) || !Array.isArray(names[name])) return null;
+    const runs = names[name].filter((r) => r && Number.isFinite(r.total) && r.total >= 0 && Number.isFinite(r.when));
+    if (!runs.length) return null;
+    const costs = Object.create(null), models = Object.create(null);
+    for (const r of runs) for (const a of Array.isArray(r.agents) ? r.agents : []) {
+      if (!a || typeof a.label !== 'string' || !Number.isFinite(a.cost) || a.cost < 0 || a.outcome === 'FAIL') continue;
+      (costs[a.label] ||= []).push(a.cost);
+      (models[a.label] ||= new Set()).add(a.model);
+    }
+    // The tier it was measured on, so a figure next to a changed model select says whose it is. Only a
+    // single, model-id-shaped value comes through; anything else is null ("mixed or unknown").
+    const sites = Object.create(null);
+    for (const k in costs) {
+      const m = models[k].size === 1 ? [...models[k]][0] : null;
+      sites[k] = { median: pct(costs[k], 0.5), n: costs[k].length, model: typeof m === 'string' && /^[\w.[\]-]{1,60}$/.test(m) ? m : null };
+    }
+    const totals = runs.map((r) => r.total), whens = runs.map((r) => r.when), sh = scriptHash(script);
+    return { n: runs.length, median: pct(totals, 0.5), p75: pct(totals, 0.75), max: Math.max(...totals),
+      from: Math.min(...whens), to: Math.max(...whens), exact: sh ? runs.filter((r) => r.sh === sh).length : null, sites };
+  } catch { return null; }
 }

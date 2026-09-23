@@ -11,7 +11,7 @@
 //    prompt is as often `a` + `b` or promptFor(x) as it is one template literal.
 //  · the WINDOW — the deciding chunk has been found 26 000 characters into a prompt, so there is no
 //    prefix worth shipping to the browser. The search happens server-side; only an id crosses.
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
@@ -27,7 +27,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const html = readFileSync(join(HOOKS, 'graph-editor.html'), 'utf8');
 const jsBody = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
 const page = new Function('acorn', jsBody.slice(0, jsBody.indexOf('// ---------------------------------------------------------------- boot'))
-  + '\n return { extract, matchRun, matchLive, matchNeedles, RUN_OF, setGraph: (g) => { GRAPH = g } };')(acorn);
+  + '\n return { extract, matchRun, matchLive, matchNeedles, edgeRun, RUN_OF, setGraph: (g) => { GRAPH = g } };')(acorn);
 
 // ---------------------------------------------------------------- the fixture run
 const T = mkdtempSync(join(tmpdir(), 'wg-live-'));
@@ -69,6 +69,18 @@ writeFileSync(join(RUNDIR, 'journal.jsonl'),
   + line({ type: 'started', key: 'v2:bbb', agentId: 'a2' })
   + line({ type: 'result', key: 'v2:aaa', agentId: 'a1', result: { anomalies: 3 } }));
 
+// Two concurrent runs, both NEWER than ours: one in this session whose prompt names no call site of
+// the approved script, one in another session whose prompt does. Newest-wins took either.
+const decoy = (sess, id, prompt) => {
+  const d = join(T, '.claude', 'projects', 'proj', sess, 'subagents', 'workflows', id);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, 'agent-d1.jsonl'), user('2026-09-03T10:00:01.000Z', prompt));
+  const later = new Date(Date.now() + 60000);
+  utimesSync(d, later, later);
+};
+decoy('sess', 'wf_decoy_same', 'an unrelated workflow reviewing the invoice backlog, nothing to do with winches');
+decoy('other', 'wf_decoy_other', P1);
+
 const g = page.extract(readFileSync(PLAN, 'utf8'));
 page.setGraph(g);
 check('a `+`-concatenated prompt still yields matchable chunks',
@@ -78,11 +90,11 @@ check('a `+`-concatenated prompt still yields matchable chunks',
 const NONCE = 'test-nonce-0123456789';
 const PORTFILE = join(T, 'port');
 const env = { ...process.env, HOME: T, USERPROFILE: T };
-const srv = spawn(process.execPath, [join(HOOKS, 'approve-server.mjs'), NONCE, PORTFILE, PLAN], { env, stdio: 'ignore' });
+const srv = spawn(process.execPath, [join(HOOKS, 'approve-server.mjs'), NONCE, PORTFILE, PLAN, 'sess'], { env, stdio: 'ignore' });
 srv.unref();
 
 let port = null;
-for (let i = 0; i < 60 && !port; i++) { await sleep(50); try { port = readFileSync(PORTFILE, 'utf8').trim(); } catch {} }
+for (let i = 0; i < 60 && !port; i++) { await sleep(50); try { port = JSON.parse(readFileSync(PORTFILE, 'utf8')).port; } catch {} }
 if (!port) { console.error('server never wrote its port'); srv.kill(); process.exit(1); }
 const url = (p) => `http://127.0.0.1:${port}${p}?n=${NONCE}`;
 const ORIGIN = { origin: `http://127.0.0.1:${port}` };
@@ -92,7 +104,7 @@ try {
   const pre = await fetch(url('/live')).then((r) => r.json());
   check('/live before approval: not running', pre.running === false, JSON.stringify(pre));
 
-  const ok = await fetch(url('/approve'), { method: 'POST', headers: { 'content-type': 'application/json', ...ORIGIN }, body: JSON.stringify({ script: readFileSync(PLAN, 'utf8'), summary: 'test', match: page.matchNeedles() }) });
+  const ok = await fetch(url('/approve'), { method: 'POST', headers: { 'content-type': 'application/json', ...ORIGIN }, body: JSON.stringify({ script: readFileSync(PLAN, 'utf8'), summary: 'test', match: page.matchNeedles(), cap: 5 }) });
   check('approve succeeds', ok.status === 200, String(ok.status));
 
   // THE invariant: run mode must not reopen the gate. Exactly one approval, before and after.
@@ -125,10 +137,20 @@ try {
     clean.includes("const HISTORY_URL = 'http://127.0.0.1:4321/?n=" + 'a'.repeat(48) + "'"),
     clean.match(/const HISTORY_URL = '[^\n]*/)?.[0] || 'missing');
 
+  // Past spend (G5): readable in run mode, null with no history, numbers for the file's own name.
+  check('/priors with no history is null, and still served in run mode', (await fetch(url('/priors')).then((r) => r.json())) === null);
+  const planName = readFileSync(PLAN, 'utf8').match(/name:\s*['"]([^'"]+)['"]/)?.[1];
+  writeFileSync(join(T, '.claude', 'workflow-gate-priors.json'), JSON.stringify({ names: { [planName]: [{ when: 1, total: 3, agents: [{ label: 'scan', cost: 1 }] }] } }));
+  const pri = await fetch(url('/priors')).then((r) => r.json());
+  check('/priors answers for the name in the approved file', !!planName && pri?.n === 1 && pri.p75 === 3 && pri.sites.scan.median === 1, JSON.stringify(pri));
+
   const live = await fetch(url('/live')).then((r) => r.json());
+  check('the spend cap set at approval comes back with /live (G11)', live.cap === 5, String(live.cap));
   const a1 = live.agents.find((a) => a.agentId === 'a1');
   const a2 = live.agents.find((a) => a.agentId === 'a2');
   check('/live found the run directory', live.started === true && live.runId === 'wf_test123', JSON.stringify({ started: live.started, runId: live.runId }));
+  check('a newer concurrent run cannot take the view — in this session or another',
+    live.runId === 'wf_test123' && live.guess === false && live.outside === false, JSON.stringify({ runId: live.runId, guess: live.guess, outside: live.outside }));
   const a3 = live.agents.find((a) => a.agentId === 'a3');
   const x1 = live.agents.find((a) => a.agentId === 'x1');
   check('every agent is reported', live.agents.length === 4, String(live.agents.length));
@@ -185,9 +207,84 @@ try {
   writeFileSync(join(SESS, 'workflows', 'wf_test123.json'), JSON.stringify({ runId: 'wf_test123', scriptPath: PLAN, status: 'completed', agentCount: 2, workflowProgress: [] }));
   const live5 = await fetch(url('/live')).then((r) => r.json());
   check('the consolidated record is what finished means', live5.finished === true);
+  const run = await fetch(url('/run')).then((r) => r.json());
+  check('/run after the finish is the record of the run this tab watched', run?.runId === 'wf_test123', JSON.stringify(run?.runId));
 } finally {
   srv.kill();
   await sleep(100);   // let the child handle close before the process does, or libuv asserts
+}
+
+// No session and nothing to verify against (every prompt computed at runtime): newest-wins, flagged.
+{
+  const pf2 = join(T, 'port2');
+  const s2 = spawn(process.execPath, [join(HOOKS, 'approve-server.mjs'), NONCE, pf2, PLAN], { env, stdio: 'ignore' });
+  try {
+    let p2 = null;
+    for (let i = 0; i < 60 && !p2; i++) { await sleep(50); try { p2 = JSON.parse(readFileSync(pf2, 'utf8')).port; } catch {} }
+    const u2 = (p) => `http://127.0.0.1:${p2}${p}?n=${NONCE}`;
+    await fetch(u2('/approve'), { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${p2}` }, body: JSON.stringify({ script: readFileSync(PLAN, 'utf8'), summary: 'test', match: {}, cap: { valueOf: 'x', toString: 'y' } }) });
+    const l = await fetch(u2('/live')).then((r) => r.json());
+    check('a malformed cap is no cap, and the approval still lands', l.cap === null && l.started === true, String(l.cap));
+    check('with nothing to verify, newest-wins is flagged as a guess', l.started === true && l.guess === true, JSON.stringify({ runId: l.runId, guess: l.guess }));
+  } finally { s2.kill(); await sleep(100); }
+}
+
+// A Workflow launched from a subagent writes under another session: the scoped lookup misses, then
+// the wide walk finds it — still verified by prompt, and flagged as found outside the session.
+{
+  const pf3 = join(T, 'port3');
+  const s3 = spawn(process.execPath, [join(HOOKS, 'approve-server.mjs'), NONCE, pf3, PLAN, 'nosuch-session'], { env, stdio: 'ignore' });
+  try {
+    let p3 = null;
+    for (let i = 0; i < 60 && !p3; i++) { await sleep(50); try { p3 = JSON.parse(readFileSync(pf3, 'utf8')).port; } catch {} }
+    const u3 = (p) => `http://127.0.0.1:${p3}${p}?n=${NONCE}`;
+    await fetch(u3('/approve'), { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${p3}` }, body: JSON.stringify({ script: readFileSync(PLAN, 'utf8'), summary: 'test', match: page.matchNeedles() }) });
+    let l = null;
+    for (let i = 0; i < 8 && !l?.started; i++) l = await fetch(u3('/live')).then((r) => r.json());
+    check('a session miss widens the search, verified and flagged outside',
+      l?.started === true && l.outside === true && l.guess === false && l.runId !== 'wf_decoy_same', JSON.stringify({ runId: l?.runId, outside: l?.outside, guess: l?.guess }));
+  } finally { s3.kill(); await sleep(100); }
+}
+
+// A run that died after its journal, before any agent: it has no prompt to verify and never will.
+// It may delay the flagged guess, never block it — the old newest-wins always bound something.
+{
+  const dead = join(T, '.claude', 'projects', 'proj', 'third', 'subagents', 'workflows', 'wf_dead');
+  mkdirSync(dead, { recursive: true });
+  writeFileSync(join(dead, 'journal.jsonl'), line({ type: 'started', key: 'v2:zzz', agentId: 'z1' }));
+  const pf4 = join(T, 'port4');
+  const s4 = spawn(process.execPath, [join(HOOKS, 'approve-server.mjs'), NONCE, pf4, PLAN], { env, stdio: 'ignore' });
+  try {
+    let p4 = null;
+    for (let i = 0; i < 60 && !p4; i++) { await sleep(50); try { p4 = JSON.parse(readFileSync(pf4, 'utf8')).port; } catch {} }
+    const u4 = (p) => `http://127.0.0.1:${p4}${p}?n=${NONCE}`;
+    await fetch(u4('/approve'), { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${p4}` },
+      body: JSON.stringify({ script: readFileSync(PLAN, 'utf8'), summary: 'test', match: { a0: ['a needle that appears in no prompt of any fixture run'] } }) });
+    let l = null, polls = 0;
+    while (polls < 12 && !l?.started) { polls++; l = await fetch(u4('/live')).then((r) => r.json()); }
+    check('a prompt-less run dir delays the flagged guess but cannot block it', l?.started === true && l.guess === true && polls > 3,
+      JSON.stringify({ polls, started: l?.started, guess: l?.guess }));
+    // The guessed run finishes as another script: it was never ours, so it must not end the view.
+    const sessOf = { wf_decoy_same: 'sess', wf_decoy_other: 'other', wf_dead: 'third' };
+    const firstGuess = l.runId;
+    const wfDir = join(T, '.claude', 'projects', 'proj', sessOf[firstGuess], 'workflows');
+    mkdirSync(wfDir, { recursive: true });
+    writeFileSync(join(wfDir, firstGuess + '.json'), JSON.stringify({ runId: firstGuess, script: 'await agent("someone else")', status: 'completed' }));
+    const lf = await fetch(u4('/live')).then((r) => r.json());
+    check('a guessed run that finished as another script is let go, not reported finished', lf.finished === false && lf.started === false,
+      JSON.stringify({ runId: lf.runId, started: lf.started, finished: lf.finished }));
+    polls = 0; l = null;
+    while (polls < 12 && !l?.started) { polls++; l = await fetch(u4('/live')).then((r) => r.json()); }
+    check('the ruled-out run is never guessed again', l?.started === true && l.runId !== firstGuess, JSON.stringify({ runId: l?.runId }));
+    // The approved run shows up after the guess: it takes the view.
+    const real = join(T, '.claude', 'projects', 'proj', 'third', 'subagents', 'workflows', 'wf_real');
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, 'agent-r1.jsonl'), user('2026-09-03T10:00:02.000Z', 'go: a needle that appears in no prompt of any fixture run, then stop'));
+    polls = 0;
+    while (polls < 25 && l?.runId !== 'wf_real') { polls++; l = await fetch(u4('/live')).then((r) => r.json()); }
+    check('a verified run replaces a guess', l?.runId === 'wf_real' && l.guess === false && l.agents.length === 1,
+      JSON.stringify({ polls, runId: l?.runId, guess: l?.guess, agents: l?.agents?.length }));
+  } finally { s4.kill(); await sleep(100); }
 }
 
 // ---------------------------------------------------------------- browser-side placement
@@ -221,6 +318,17 @@ check('a tie between two call sites is spread by arrival order, both flagged',
 page.matchLive([{ agentId: 'p', nodeId: 'a0', state: 'running', byOrder: false }, { agentId: 'q', nodeId: 'a0', state: 'done', byOrder: false }]);
 check('several agents stack on the one site that owns them',
   page.RUN_OF.a0.length === 2 && page.RUN_OF.a0.every((a) => !a.byOrder), String(page.RUN_OF.a0.length));
+
+// The incremental repaint recomputes an edge from its two ends; it must say what the full repaint said.
+{
+  const e = (a, b, k) => page.edgeRun(a, b, k).join();
+  check('edge classes from both ends match the full repaint',
+    e('done', 'running', 'flow') === 'run-fired' && e('skipped', 'done', 'flow') === 'run-skipped,run-fired'
+    && e('done', 'skipped', 'flow') === 'run-skipped' && e('done', 'done', 'data') === ''
+    && e(undefined, 'done', 'flow') === 'run-fired' && e('done', undefined, 'flow') === ''
+    && e(undefined, 'skipped', 'data') === 'run-skipped',
+    [e('done', 'running', 'flow'), e('skipped', 'done', 'flow'), e('done', 'skipped', 'flow'), e(undefined, 'done', 'flow'), e('done', undefined, 'flow')].join(' | '));
+}
 
 // ---------------------------------------------------------------- accuracy, against real runs
 // The check that caught two design errors. "A chunk matched somewhere in the graph" is not the
