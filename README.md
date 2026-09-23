@@ -1,56 +1,122 @@
 <div align="center">
-  <img src="assets/logo.svg" width="120" alt="workflow-gate logo — a striped barrier arm on a hinge">
+
+<img src="assets/logo.svg" width="96" alt="workflow-gate logo: a striped barrier arm lifted over a small agent graph">
 
 # workflow-gate
 
-### Approve the exact script before it runs. Then govern what it's allowed to spend and touch while it does.
+**A human approves the exact script before a Claude Code `Workflow` runs.<br>Then they can see what it will cost, what it touches, and watch it run.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](./LICENSE)
-[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/VictorGjn/workflow-gate)
-[![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen?style=for-the-badge)](https://github.com/VictorGjn/workflow-gate)
-[![Runtime: Node](https://img.shields.io/badge/runtime-Node-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://github.com/VictorGjn/workflow-gate)
+[![Version](https://img.shields.io/badge/version-1.8.0-D97757?style=flat-square)](plugin/.claude-plugin/plugin.json)
+[![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-17151F?style=flat-square&logo=anthropic&logoColor=F5F1E8)](#install)
+[![Runtime deps](https://img.shields.io/badge/npm_runtime_deps-0-7BC8A4?style=flat-square)](plugin/hooks)
+[![Node](https://img.shields.io/badge/runtime-Node-5B5670?style=flat-square&logo=node.js&logoColor=F5F1E8)](plugin/hooks)
+[![License: MIT](https://img.shields.io/badge/license-MIT-5B5670?style=flat-square)](LICENSE)
+
+<img src="assets/hero.gif" width="100%" alt="Animated: streams of agent tasks queue at a striped barrier; the barrier lifts and the work flows into a branching graph">
 
 </div>
 
+Claude Code's `Workflow` tool can fan one call out into dozens of sub-agents: `pipeline()`, `parallel()`, loops, model tiers, worktrees. `workflow-gate` puts a barrier in front of that call. The barrier lifts for **one script, byte for byte**, once a human has looked at it.
+
+```
+/plugin marketplace add VictorGjn/workflow-gate
+/plugin install workflow-gate@victorgjn
+```
+
+That is the whole install. The gate, the graph editor, the history viewer and the `workflow-orchestration-patterns` skill are active in your next session.
+
 ---
 
-Claude Code's native `Workflow` tool can fan out into a whole tree of sub-agents — `pipeline()`, `parallel()`, multiple model tiers, worktree isolation — from a single call. That's powerful, and it raises two separate questions before you let it run: *should this launch at all*, and once it's running, *what is each agent inside it actually allowed to spend and touch*.
+## How it works
 
-**`workflow-gate` answers both.** A `PreToolUse` hook blocks the launch until you approve the exact script, content-fingerprinted so an edit-and-rerun can't sneak through on a stale approval. And a bundled skill teaches Claude how to design the workflow itself so cost and access are deliberate, not accidental — which model tier does which job, which skills or MCP tools each agent actually gets, and what happens when an agent hits a capability gap it wasn't granted mid-run.
+<div align="center">
+<img src="assets/flow.svg" width="100%" alt="Animated diagram: a Workflow script on the left, a barrier labelled 'waiting for a human', an Approve and run button that gets clicked, the barrier lifts with 'approved by a human, sha256 3f9c…e1', and packets flow through three review agents, a verify loop and ship">
+</div>
 
-The gate is the part you notice first. The tiering and capability rules are what actually keep a run from quietly costing more, or touching more, than you meant.
+1. **Claude calls `Workflow`.** A `PreToolUse` hook stops the call before a single agent starts.
+2. **A graph editor opens in your browser** and the hook waits for your click. The script is drawn as a flowchart: one node per `agent()` call site, diamonds for conditions, hexagons for loops, `×N` on fan-outs.
+3. **You approve that exact content.** The approval is keyed to `SHA-256(script + plugin version)`. Edit one character and the gate fires again.
+4. **The same tab becomes the live view** of the run you just approved: agents lighting up, spend climbing, last tool called.
 
-## Why this exists
+## The real editor
 
-A multi-agent workflow is the highest-leverage, highest-blast-radius call in Claude Code, and it fails in two different ways that most tooling only half-addresses:
+<div align="center">
+<img src="assets/demo.gif" width="100%" alt="Screen recording of the workflow-gate graph editor: the reviewer follows 'needs your eyes', opens the verify agent, applies Jev's model-tier suggestion, sets a 4.50 dollar spend cap, and clicks Approve and run">
+<br><sub>Recorded from the plugin itself on a sample <code>review-and-fix-pr</code> script. Nothing is mocked.</sub>
+</div>
 
-1. **It launches something you didn't fully review.** The built-in confirmation prompt is bypassable by permission mode and doesn't pin approval to the script's actual content — edit the script and rerun, and it sails through on the old approval.
-2. **Once it's running, nobody decided what each agent gets.** A cheap-tier agent ends up doing judgment calls it shouldn't. A worker reaches for a tool it was never explicitly granted, or silently works around not having it. Nobody is watching whether the model-tier mix actually matches the task, or whether an agent quietly escalated its own access.
+In twenty seconds, the reviewer:
 
-`workflow-gate` closes the first gap with a content-fingerprinted approval. It closes the second with a skill that makes cost and capability decisions explicit *at design time*, plus a runtime protocol for the gaps that only show up once agents are actually running.
+- follows **"2 items need your eyes"**: an agent inside a loop with no bound, and one whose mission pushes to a remote;
+- opens the `verify` agent, reads its full mission and where each `⟨interpolation⟩` comes from;
+- **applies a model-tier suggestion** with one click. The edit is spliced into the original bytes, so everything else stays identical;
+- sets a **spend cap** of $4.50, with alerts at 80% and 100%;
+- clicks **Approve & run**. That call goes through, and nothing else.
+
+<details>
+<summary><b>No browser? What Claude reads instead</b></summary>
+
+With `WORKFLOW_GATE_NO_UI=1`, or when nobody touches the editor for 90 s, Claude gets the gate's decision in text and has to take it back to you:
+
+```text
+⛔ Workflow plan-gate — no recorded human approval for this exact script.
+This is a hard decision (which workflow shape is right, and does the cost match the task) — resolve it with a human before this call runs:
+
+1) Enter Plan Mode. Propose the recommended workflow design, PLUS 1-2 real alternatives …
+2) Get the user's explicit choice (ExitPlanMode approval, or a direct answer in chat).
+3) Record the approved plan (this lifts the gate)
+4) Retry the Workflow call — same script content.
+
+Static estimate for the script as submitted (call-site counts, not runtime counts):
+  name: review-and-fix-pr
+  phases: Review → Verify → Fix → Ship
+  agent() call sites: 5 — ⚠ AGENTS ACTUALLY LAUNCHED IS HIGHER: a parallel()/pipeline() fans out over a runtime list
+  isolation:'worktree': yes   schema outputs used: yes
+  ⚠ a runtime-sized fan-out may run on the top tier: the list size multiplies the most expensive rate.
+```
+
+</details>
+
+## What you get
+
+| When | What | Why it matters |
+|---|---|---|
+| **Before the run** | `≥ N agents will run`, a static lower bound checked against every recorded run | The number you approve is never an over-promise |
+| | **Diff against your last approval** of the same script | Re-runs with small edits don't mean re-reading everything |
+| | **Needs your eyes**: unbounded loops, top-tier fan-outs, missions that push, deploy or delete | Your attention goes where the risk is |
+| | **Past spend** of this workflow (median / p75 / max, with `n` and dates) | A dollar figure before you click, from runs that actually happened |
+| | Optional **model-tier advice** from [Jev](https://docs.typesafe.ai) with a price delta; stricter when the stakes are high | Cheaper tiers where a mission is mechanical. Advice only |
+| **During the run** | Live graph: per-node state, `k/N done`, spend so far, spend cap alerts | "Already $180 at minute twenty" arrives while you can still stop it |
+| **After the run** | History of every run on the machine, **priced from real token usage** (each message counted once) | Cost is measured, not estimated |
+| | Opt-in outcome check: did each agent actually deliver? | Cheap failures stop looking like cheap successes |
+
+## Only you can lift it
+
+The gate protects one promise: **a human approved this exact script.** Version 1.8 closes the ways text could stand in for that human.
+
+- **The override is yours alone.** Send "override manual approval" (optionally "for 2h") as its own message to lift the gate for the session; "restore manual approval" puts it back. It only counts as your own message or its first line.
+- **Injected text never counts.** Task notifications, system reminders and pasted tool output never lift the gate, even when they quote the phrase. A real run of this project found that bug: a workflow result quoted the phrase as a test case and the gate turned itself off. It is fixed and covered by a selftest.
+- **Negations never count.** "Never override manual approval" and "no need to override, I'll click approve" leave the gate on.
+- **Scheduled prompts never count.** `CronCreate` and `ScheduleWakeup` prompts carrying the phrase are refused.
+- **Fails open on its own bugs, never on a missing decision.** An internal error steps aside instead of wedging your session. A closed tab, a timeout or silence is a *no*.
 
 ## Cost and capability governance
 
-Most approval hooks stop at "should this launch" and have nothing to say about what happens once it does. This is the part that fills that gap.
-
-### Cost control through model-tier selection
-
-The bundled `workflow-orchestration-patterns` skill gives Claude an explicit framework for picking a model per agent, instead of defaulting every call to whatever's convenient:
+The bundled `workflow-orchestration-patterns` skill teaches Claude to design the workflow so that cost and access are decided, not defaulted.
 
 | Tier | Use for | Never for |
 |---|---|---|
-| **Cheap** (Haiku) | Small, mechanical, narrowly-scoped units — applying an already-accepted fix, summarizing one item in a fan-out | Deciding accept/reject on its own output |
-| **Mid** (Sonnet, default) | Most builds, most reviews, most single `agent()` calls | — |
-| **Strong** (Opus) | Large-context synthesis, a hard verification pass, a decision with real consequences | Routine implementation a cheaper tier handles just as well |
-| **Advisor** (Opus) | Planning the decomposition, a terse sanity-check before something ships | Bulk execution |
+| **Haiku** | Small, mechanical, narrowly scoped units: applying an accepted fix, one item of a fan-out | Judging its own output |
+| **Sonnet** (default) | Most builds, most reviews, most single `agent()` calls | — |
+| **Opus** | Large-context synthesis, a hard verification pass, a decision with consequences | Routine work a cheaper tier does as well |
+| **Advisor** (Opus) | Planning the decomposition, a terse check before something ships | Bulk execution |
 
-It's not "cheaper model = better" — the skill is explicit that tiering only pays off when it genuinely narrows *scope* per agent, not when a cheaper model name gets swapped onto an identically-sized task. A large share of any agent's cost is context and reading overhead, which a cheap tier pays too.
+Tiering pays off only when it narrows the **scope** of each agent. A cheaper model name on an identically sized task still pays the same context and reading overhead.
 
-### Capability-aware phase agents
+<details>
+<summary><b>Capability-aware agents and capability escalation</b></summary>
 
-Skills and MCP tools aren't automatic inside a `Workflow` — an agent only reaches for one if it has access *and* its prompt gives it a reason to. Left implicit, that's unreliable: a Haiku agent told only "build the login form" has no signal a `frontend-conventions` skill even exists.
-
-The skill's fix: **name the capability explicitly, and verify the agent actually has access to it.**
+Skills and MCP tools are not automatic inside a `Workflow`: an agent reaches for one only if it has access **and** its prompt gives it a reason to. The skill names the capability explicitly and gives the agent a type that has it:
 
 ```js
 const built = await agent(
@@ -59,101 +125,53 @@ const built = await agent(
 )
 ```
 
-`agentType: 'general-purpose'` isn't decoration — `Skill`-tool access on a subagent was verified directly (spawned one, had it invoke a real skill, confirmed it loaded), not assumed. The unspecified default toolset for a bare workflow agent isn't documented to include it.
-
-### Capability escalation: an advisor decides, not the worker
-
-The part that's genuinely rare: what happens when an agent discovers **mid-run** that it needs something it wasn't granted. Most setups either let the worker silently reach for it, or the whole workflow just breaks.
-
-`workflow-gate`'s pattern: **the worker reports, an advisor-tier agent judges the request, and only real risk reaches a human.**
+When a worker discovers mid-run that it needs something it was not granted, it **reports** instead of working around it. An advisor-tier agent judges the request by consequence, and only real risk reaches a human:
 
 ```js
-// worker reports a gap instead of working around it or silently failing
-result = await agent(
-  `Load skills from [${grantedSkills.join(', ')}] via the Skill tool. Implement: ${spec}. ` +
-  `If you need something outside that list, don't work around it — set capabilityRequest instead.`,
-  { model: 'haiku', agentType: 'general-purpose', schema: WORKER_SCHEMA }
-)
-
 if (result.capabilityRequest) {
-  // an advisor-tier agent judges by consequence, not by whether the request was merely unplanned
   const judged = await agent(
     `Worker requested "${result.capabilityRequest.name}" because: ${result.capabilityRequest.reason}. ` +
     `Destructive, externally visible, or credential-touching → escalate_to_human. Otherwise → auto_allow.`,
     { model: 'opus', schema: ADVISOR_SCHEMA }
   )
-
-  if (judged.decision === 'escalate_to_human') {
-    // the Workflow tool can't pause mid-run — stop cleanly with a structured result instead of guessing
+  if (judged.decision === 'escalate_to_human')
     return { status: 'needs_human_decision', request: result.capabilityRequest, rationale: judged.rationale }
-  }
-  // auto_allow: grant expands, worker retries — capped, so repeated requests still escalate eventually
 }
 ```
 
-Auto-allow retries the worker with the grant expanded, capped at two rounds — hit the cap and it escalates anyway, even if every individual request looked safe in isolation, because *repeated* capability creep in one phase is itself worth a human's attention. This is stated plainly as a **soft, instructional boundary** — a named grant list is an instruction the model could in principle ignore, not a hard security wall. For genuinely untrusted input, the skill points to the harder boundary (a custom `agentType` with a narrower registry-level toolset) instead.
+Auto-allow is capped at two rounds, then escalates anyway: repeated capability creep in one phase is itself worth a human's attention. The grant list is an **instruction**, not a sandbox. For untrusted input, use a custom `agentType` with a narrower toolset.
 
-## What you see when the launch gate fires
-
-The blocked call opens a **graph editor** in your browser and the hook waits for your click. It shows the script as a flowchart — one node per `agent()` call site, diamonds for conditions, hexagons for loops, `×N` badges on fan-outs — with a header stating the number you are approving: `≥ N agents will run`, a static lower bound that never exceeds the real count on any recorded run.
-
-Select a node to read or edit its mission and model tier, then **Approve & run** — that exact call goes through, edits included. **Cancel**, closing the tab, or a timeout does not approve. Edit one line of the script and the fingerprint changes, so the gate fires again. **No stale approvals, ever.**
-
-Not at your desk? After 90 s untouched the hook falls back to chat: say "approved" and the agent records it for that file.
-
-## How the launch gate works
-
-- **By-name `PreToolUse` match.** The hook intercepts the `Workflow` tool's launch call specifically — not every tool, not a broad permission bucket.
-- **Content fingerprinting.** Approval is keyed to `SHA-256(script text + hook version)`. Approve script A, and only byte-identical script A runs.
-- **Edits spliced, never re-emitted.** Mission and model edits are applied at AST offsets on the original bytes; a no-op edit stays byte-identical. Control flow is shown, never rewritten.
-- **Override in your own words.** Send "override manual approval" (optionally "for 2h") as its own message, or its first line, to lift the gate for that session; "restore manual approval" puts it back. A `UserPromptSubmit` hook reads your prompt directly. System-injected turns (task notifications, reminders), negated sentences ("never override…") and scheduled prompts (`CronCreate`/`ScheduleWakeup`) never count, and every run under an override says so.
-- **Review aids.** A diff against the last approved version of the same script, a "needs your eyes" callout on the riskiest nodes, past spend (median / p75 / max) before you approve, and an optional spend cap that alerts at 80% and 100%.
-- **Live run view.** After approval the same tab paints the run onto the graph: per-node state, `k/N done`, last tool called, launched vs. approved.
-- **History and measured cost.** `node plugin/hooks/workflow-plan-gate.mjs history` opens a read-only viewer of every run on the machine, priced from the transcripts' real token usage, each message counted once (cache reads included), with per-run and per-label notes.
-- **Optional model-routing advice.** With `TYPESAFE_API_KEY` set, the editor suggests a tier per agent. Advice only — it never approves anything, and only the extracted skeleton leaves the machine.
-- **A `SessionStart` hook** announces in-context that the gate is active, so Claude knows the constraint from the first turn.
-- **Fails open.** Plain Node, no npm runtime dependencies. On any internal error the gate steps aside rather than wedging your session. Kill switch: `WORKFLOW_GATE_OFF=1`; `WORKFLOW_GATE_NO_UI=1` keeps the text-only flow.
+</details>
 
 ## Where it fits
 
-Verified against a real research pass over GitHub code and repos, npm, the official and community Claude Code plugin marketplaces, and the broader agent-framework / cost-governance landscape — nothing else bundles all three of these:
+| | Content-pinned approval | Visual review of the graph | Measured cost | Model-tier guidance | Capability escalation |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **workflow-gate** | ✅ SHA-256, re-gates on edit | ✅ flowchart, diff, live run | ✅ from token usage | ✅ skill + Jev advice | ✅ advisor-judged |
+| Claude Code's built-in prompt | ⚠️ bypassable by permission mode | ❌ | ❌ | ❌ | ❌ |
+| Generic guardrail hooks | ⚠️ broad Bash/Write blocking | ❌ | ❌ | ❌ | ❌ |
 
-| | Content-pinned launch approval | Model-tier cost guidance | Runtime capability escalation |
-|---|:---:|:---:|:---:|
-| **workflow-gate** | ✅ SHA-256, re-gates on edit | ✅ explicit tier framework | ✅ advisor-judged, human-escalated |
-| Claude Code's built-in prompt | ⚠️ bypassable by permission mode | ❌ | ❌ |
-| Nearest third-party hook | ❌ unblocks via automated marker file | ❌ | ❌ |
-| Generic agent guardrail plugins | ⚠️ broad Bash/Write blocking, not launch-specific | ❌ | ❌ |
+## Configuration
 
-Most tools in this space stop at "should this run." This one also answers "what is it allowed to cost and touch while it does" — which is the harder, less-solved problem.
+| Variable | Effect |
+|---|---|
+| `WORKFLOW_GATE_OFF=1` | Kill switch: the gate steps aside entirely |
+| `WORKFLOW_GATE_NO_UI=1` | No browser; the text flow above everywhere |
+| `TYPESAFE_API_KEY` | Enables Jev's intent and model-tier advice in the editor. Only the extracted skeleton (name, phases, one mission per agent) leaves the machine |
+| `WORKFLOW_GATE_OUTCOME=1` | With the key: after each run, Jev checks whether each agent delivered. Opt-in, results truncated to 1.5 KB |
+
+`node plugin/hooks/workflow-plan-gate.mjs history` opens the history viewer. Full technical documentation: [`plugin/README.md`](plugin/README.md).
 
 ## Honest limitations
 
-Stated plainly, because this is the part that matters:
+> **The gate defends against accidental and expensive launches, not against an adversarial agent.** An agent with a shell can still run the plugin's own `override` command or write its state file. The v1.8 hardening stops *text* from being credited to you; it does not sandbox a determined agent. Likewise, a capability grant list is an instruction, not an enforced boundary.
 
-> **The approval-recording step is a procedural trust boundary, not cryptographic proof that a human actually reviewed the script.** `workflow-gate` defends against **accidental and expensive launches**, not an adversarial agent that sets out to record its own approval. Likewise, the capability grant list is an **instruction**, not an enforced sandbox — a genuinely untrusted phase needs the harder `agentType`-scoping boundary, not this protocol alone.
-
-What it does do well: make sure a workflow that runs is the exact one you meant, sized and scoped the way you actually decided, not however the model defaulted to.
-
-## Install
-
-Inside Claude Code:
-
-```
-/plugin marketplace add VictorGjn/workflow-gate
-/plugin install workflow-gate@victorgjn
-```
-
-That's it — the `PreToolUse` gate, the `SessionStart` announcement, and the `workflow-orchestration-patterns` skill are active on your next session.
-
-To disable the launch gate temporarily without uninstalling:
-
-```
-WORKFLOW_GATE_OFF=1
-```
-
-Full technical documentation lives in [`plugin/README.md`](plugin/README.md).
+- Cost figures use Anthropic first-party API rates. On a subscription, that is the API-equivalent cost, not your bill.
+- Jev advice is advice. It never approves, denies or applies anything on its own, and low-confidence answers are shown as such.
+- The editor loads acorn, cytoscape and dagre from public CDNs. Offline it cannot start, and the text flow in chat takes over.
 
 ## License
 
-MIT © [VictorGjn](https://github.com/VictorGjn). A personal open-source project — issues and PRs welcome.
+MIT © [VictorGjn](https://github.com/VictorGjn). Issues and PRs welcome.
+
+<sub>Hero animation generated with Higgsfield (GPT Image 2.5 → Seedance 2.5). Diagram, logo and editor recording made from the plugin's own code.</sub>

@@ -1011,7 +1011,7 @@ function buildStyle() {
       'shape': 'diamond', 'width': 196, 'height': 88, 'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': 118,
       'font-family': mono, 'font-size': 10, 'text-valign': 'center', 'text-halign': 'center', 'min-zoomed-font-size': 7,
       'background-color': css('--lane'), 'border-width': 1, 'border-color': css('--edge'), 'color': css('--ink') } },
-    { selector: 'node[kind="loop"]', style: { 'shape': 'round-hexagon', 'height': 66, 'border-color': css('--run'), 'label': (e) => '↻ ' + e.data('label') } },
+    { selector: 'node[kind="loop"]', style: { 'shape': 'hexagon', 'height': 66, 'border-color': css('--run'), 'label': (e) => '↻ ' + e.data('label') } },
     { selector: 'node[kind="start"], node[kind="end"]', style: {
       'shape': 'ellipse', 'width': 62, 'height': 30, 'label': 'data(label)', 'font-size': 10, 'font-weight': 600,
       'text-valign': 'center', 'text-halign': 'center', 'background-color': css('--ink'), 'color': css('--bg'), 'border-width': 0 } },

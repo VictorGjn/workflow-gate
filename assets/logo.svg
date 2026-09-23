@@ -1,24 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-labelledby="wg-logo-title wg-logo-desc">
   <title id="wg-logo-title">workflow-gate</title>
-  <desc id="wg-logo-desc">A dark rounded square containing an abstracted striped barrier arm, pivoted on a hinge — the universal "stop until cleared" shape</desc>
+  <desc id="wg-logo-desc">A striped barrier arm raised on its hinge over a small agent graph flowing through: the run starts only once the gate is lifted</desc>
   <defs>
-    <clipPath id="wg-bar-clip">
-      <rect x="14" y="47" width="92" height="26" rx="13"/>
+    <clipPath id="wg-arm">
+      <rect x="0" y="-8" width="78" height="16" rx="8"/>
     </clipPath>
   </defs>
 
   <rect x="4" y="4" width="112" height="112" rx="26" fill="#17151F"/>
 
-  <g transform="rotate(-24 60 60)">
-    <g clip-path="url(#wg-bar-clip)">
-      <rect x="14" y="47" width="15" height="26" fill="#F5F1E8"/>
-      <rect x="29" y="47" width="15" height="26" fill="#D97757"/>
-      <rect x="44" y="47" width="15" height="26" fill="#F5F1E8"/>
-      <rect x="59" y="47" width="15" height="26" fill="#D97757"/>
-      <rect x="74" y="47" width="15" height="26" fill="#F5F1E8"/>
-      <rect x="89" y="47" width="17" height="26" fill="#D97757"/>
-    </g>
-    <circle cx="18" cy="60" r="12" fill="#D97757" stroke="#17151F" stroke-width="3"/>
-    <circle cx="18" cy="60" r="4" fill="#17151F"/>
+  <!-- the agent graph passing under the raised arm: one in, fan-out of two, one out -->
+  <g fill="none" stroke="#5B5670" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 84 H44 L56 72 H72 L84 84 H100"/>
+    <path d="M44 84 L56 96 H72 L84 84"/>
   </g>
+  <circle cx="20" cy="84" r="6" fill="#F5F1E8"/>
+  <circle cx="64" cy="72" r="5" fill="#F5F1E8"/>
+  <circle cx="64" cy="96" r="5" fill="#F5F1E8"/>
+  <circle cx="100" cy="84" r="6" fill="#F5F1E8"/>
+  <circle cx="36" cy="84" r="3.2" fill="#D97757"/>
+  <circle cx="84" cy="84" r="3.2" fill="#D97757"/>
+
+  <!-- the barrier, lifted -->
+  <g transform="translate(26 50) rotate(-25)">
+    <g clip-path="url(#wg-arm)">
+      <rect x="0" y="-8" width="78" height="16" fill="#F5F1E8"/>
+      <rect x="14" y="-8" width="12" height="16" fill="#D97757"/>
+      <rect x="38" y="-8" width="12" height="16" fill="#D97757"/>
+      <rect x="60" y="-8" width="12" height="16" fill="#D97757"/>
+    </g>
+  </g>
+  <circle cx="26" cy="50" r="10" fill="#D97757" stroke="#17151F" stroke-width="3"/>
+  <circle cx="26" cy="50" r="3.4" fill="#17151F"/>
 </svg>
