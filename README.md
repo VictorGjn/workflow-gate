@@ -7,7 +7,7 @@
 **A human approves the exact script before a Claude Code `Workflow` runs.<br>Then they can see what it will cost, what it touches, and watch it run.**
 
 [![Version](https://img.shields.io/badge/version-1.8.0-D97757?style=flat-square)](plugin/.claude-plugin/plugin.json)
-[![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-17151F?style=flat-square&logo=anthropic&logoColor=F5F1E8)](#install)
+[![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-17151F?style=flat-square&logo=anthropic&logoColor=F5F1E8)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Runtime deps](https://img.shields.io/badge/npm_runtime_deps-0-7BC8A4?style=flat-square)](plugin/hooks)
 [![Node](https://img.shields.io/badge/runtime-Node-5B5670?style=flat-square&logo=node.js&logoColor=F5F1E8)](plugin/hooks)
 [![License: MIT](https://img.shields.io/badge/license-MIT-5B5670?style=flat-square)](LICENSE)
