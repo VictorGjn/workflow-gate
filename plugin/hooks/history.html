@@ -1,0 +1,374 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Workflow history</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  /* Same visual language as the plan gate, minus the CDNs: this page needs no parser and no graph
+     library, so it works with the network off. */
+  :root {
+    --bg: #f3f4f7; --panel: #fff; --lane: #eaecf1; --ink: #14171f; --dim: #7b8394; --ink-2: #4b5262;
+    --line: #dfe2e9; --edge: #5b6272; --accent: #2f5bea; --accent-ink: #fff;
+    --ok: #1f8a4c; --run: #b7791f; --err: #c6362b; --chip: #e9edff; --chip-ink: #2544b8; --mono-bg: #f7f8fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1116; --panel: #171a21; --lane: #14171e; --ink: #e6e8ee; --dim: #7f8797; --ink-2: #b3b9c7;
+            --line: #262b36; --edge: #8a92a6; --accent: #7c9bff; --accent-ink: #0f1116;
+            --ok: #4cc47f; --run: #e0a54a; --err: #f07a6e; --chip: #1f2a4d; --chip-ink: #b7c6ff; --mono-bg: #11141a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; background: var(--bg); color: var(--ink);
+         font: 13.5px/1.45 "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .meta { color: var(--dim); font-size: 12px; }
+  main { display: grid; grid-template-columns: minmax(560px, 1fr) 460px; min-height: 0; }
+  /* A display rule beats the [hidden] attribute, so switching tabs needs this to actually hide. */
+  main[hidden], .thread[hidden] { display: none; }
+  .list { overflow-y: auto; padding: 0 0 40px; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; font-weight: 600; color: var(--dim); font-size: 11px; text-transform: uppercase;
+       letter-spacing: .05em; padding: 8px 10px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line); }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: baseline; }
+  td small { display: block; color: var(--dim); font-size: 11px; margin-top: 1px; }
+  td .chip + small { display: inline; margin-left: 6px; }
+  tr.run { cursor: pointer; }
+  tr.run:hover td { background: var(--lane); }
+  tr.run.sel td { background: var(--chip); }
+  .chip { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; background: var(--chip); color: var(--chip-ink);
+          font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .chip.live { background: var(--run); color: #fff; }
+  .chip.worked { background: var(--ok); color: #fff; }
+  .chip.mixed { background: var(--run); color: #fff; }
+  .chip.failed { background: var(--err); color: #fff; }
+  .dim { color: var(--dim); }
+  .bar { height: 4px; background: var(--lane); border-radius: 2px; overflow: hidden; margin-top: 3px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  aside section + section { margin-top: 20px; }
+  .rows { display: grid; grid-template-columns: 128px 1fr; row-gap: 5px; column-gap: 10px; font-size: 12.5px; margin: 0; }
+  .rows dt { color: var(--dim); } .rows dd { margin: 0; }
+  .sentence { font-size: 12.5px; color: var(--ink-2); border-left: 2px solid var(--line); padding-left: 10px; margin: 10px 0 0; }
+  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  textarea { width: 100%; font: inherit; font-size: 12.5px; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+             border-radius: 6px; padding: 8px; min-height: 70px; resize: vertical; }
+  .verdicts { display: flex; gap: 6px; margin-bottom: 8px; }
+  ul.plain { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+  ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: baseline; }
+  ul.plain li small { display: block; color: var(--dim); font-size: 11px; }
+  .path { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; word-break: break-all; color: var(--ink-2); }
+  .empty { color: var(--dim); font-size: 13px; }
+  details > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  pre.script { max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--mono-bg);
+               border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-family: "IBM Plex Mono", ui-monospace, monospace;
+               font-size: 11px; line-height: 1.45; margin: 8px 0 0; color: var(--ink-2); }
+  /* Tabs. The run table and a thread are different shapes — one is scannable rows, the other is a
+     document you read top to bottom — so they get different layouts rather than a shared grid. */
+  .tabs { display: flex; gap: 2px; }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom-color: transparent; padding: 4px 14px; font-size: 12.5px; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .thread { overflow-y: auto; padding: 18px 26px 60px; max-width: 1000px; }
+  .thread h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim);
+               margin: 26px 0 10px; font-weight: 600; border-bottom: 1px solid var(--line); padding-bottom: 5px; }
+  .search { display: flex; gap: 8px; align-items: center; }
+  .search input { width: 320px; padding: 6px 10px; }
+  .left { border-left: 2px solid var(--line); padding-left: 12px; margin: 8px 0 0; }
+  .left.hot { border-left-color: var(--err); }
+  .left.ok { border-left-color: var(--ok); }
+  .entry { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .entry .when { font-family: "IBM Plex Mono", ui-monospace, monospace; color: var(--dim); font-size: 11.5px; }
+  .entry b { font-size: 13.5px; }
+  .decision { font-size: 12.5px; color: var(--ink-2); margin: 4px 0 0 2px; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
+          border: 1px solid var(--line); color: var(--dim); margin-right: 5px; }
+  .quote { font-size: 12.5px; color: var(--ink-2); background: var(--mono-bg); border: 1px solid var(--line);
+           border-radius: 6px; padding: 7px 9px; margin: 5px 0 0; white-space: pre-wrap; word-break: break-word; }
+  .note { font-size: 11.5px; color: var(--dim); border-left: 2px solid var(--line); padding-left: 9px; margin-top: 14px; }
+</style>
+
+<header>
+  <h1>Claude work</h1>
+  <span class="tabs">
+    <button id="tab-runs" class="on">Runs</button>
+    <button id="tab-thread">Thread</button>
+  </span>
+  <span class="meta" id="hdr">loading…</span>
+  <span class="search" id="searchbox" hidden>
+    <input id="q" placeholder="company brain, anabasis, PRD-132…" autocomplete="off">
+    <button id="go">Find</button>
+  </span>
+  <span style="flex:1"></span>
+  <span class="meta" id="costing"></span>
+</header>
+
+<main>
+  <div class="list">
+    <table>
+      <thead><tr>
+        <th>run</th><th>workflow</th><th class="num">agents</th><th class="num">min</th>
+        <th class="num">cost</th><th>verdict</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <aside id="panel"><p class="empty">Pick a run to see where its money went, and to say how it went.</p></aside>
+</main>
+
+<div class="thread" id="threadview" hidden>
+  <p class="empty">Type what you were working on — the words you would have used, not a session id.
+  Handoffs, sessions, memories and tickets get pulled into one thread.</p>
+</div>
+
+<script>
+const NONCE = '__NONCE__';
+const q = (p) => p + (p.includes('?') ? '&' : '?') + 'n=' + NONCE;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const usd = (n) => (n == null ? '—' : '$' + (n >= 100 ? Math.round(n) : n.toFixed(2)));
+const tok = (n) => (n == null ? '—' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' B' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n));
+const when = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+let RUNS = [], NOTES = {}, SEL = null, DETAIL = null, TIMER = null;
+
+async function loadList() {
+  const d = await fetch(q('/runs')).then((r) => r.json());
+  RUNS = d.runs; NOTES = d.notes || {};
+  const priced = RUNS.filter((r) => r.cost != null);
+  const total = priced.reduce((s, r) => s + r.cost, 0);
+  const sorted = priced.map((r) => r.cost).sort((a, b) => a - b);
+  const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : 0);
+  const live = RUNS.filter((r) => r.live).length;
+  $('hdr').textContent = `${RUNS.length} runs · ${usd(total)} total · median ${usd(pct(0.5))} · p75 ${usd(pct(0.75))} · max ${usd(sorted[sorted.length - 1] || 0)}`
+    + (live ? ` · ${live} running now` : '');
+  $('costing').textContent = d.pending ? `costing ${d.pending} more run${d.pending === 1 ? '' : 's'}…` : `prices as of ${d.pricesAt} · API-equivalent, not a bill`;
+  renderRows();
+  // A live run that is open in the panel is re-read too, or its cost would sit frozen at the moment
+  // it was clicked — which is the one number that must not be stale. But NOT while a note is being
+  // typed: re-rendering the panel wholesale would replace the textarea mid-sentence.
+  const typing = document.activeElement && document.activeElement.tagName === 'TEXTAREA';
+  const sel = RUNS.find((r) => r.runId === SEL);
+  // Live: the cost moves. Completed but only just costed: the panel is still showing a dash.
+  const wasPending = DETAIL && DETAIL.runId === SEL && DETAIL.cost == null && sel && sel.cost != null;
+  if (!typing && sel && (sel.live || wasPending)) select(SEL, true);
+  // Keep polling while anything is unpriced or in flight; stop once the picture is settled.
+  clearTimeout(TIMER);
+  if (d.pending || live) TIMER = setTimeout(loadList, 2500);
+}
+
+function renderRows() {
+  const max = Math.max(...RUNS.map((r) => r.cost || 0), 1);
+  $('rows').innerHTML = RUNS.map((r) => {
+    const n = NOTES[r.runId] || {};
+    const v = n.verdict;
+    return `<tr class="run ${SEL === r.runId ? 'sel' : ''}" data-id="${esc(r.runId)}">
+      <td><span class="chip ${r.live ? 'live' : ''}">${r.live ? 'running' : esc(r.status)}</span>
+          <small class="dim mono"> ${when(r.when)}</small></td>
+      <td>${esc(r.name)}<small class="dim">${esc(r.session.slice(0, 8))} · ${esc(r.project.slice(0, 22))}</small></td>
+      <td class="num">${r.doneCount}/${r.agentCount}</td>
+      <td class="num">${r.durationMs ? Math.round(r.durationMs / 60000) : '—'}</td>
+      <td class="num">${usd(r.cost)}${r.cost != null ? `<div class="bar"><i style="width:${Math.round((r.cost / max) * 100)}%"></i></div>` : ''}</td>
+      <td>${v ? `<span class="chip ${v}">${v}</span>` : n.text ? '<span class="chip">noted</span>' : ''}</td>
+    </tr>`;
+  }).join('');
+  for (const tr of document.querySelectorAll('tr.run')) tr.onclick = () => select(tr.dataset.id);
+}
+
+let SEQ = 0;
+async function select(id, quiet) {
+  const mine = ++SEQ;                       // click A then B: A's slower answer must not win
+  SEL = id; renderRows();
+  if (!quiet) $('panel').innerHTML = '<p class="empty">loading…</p>';
+  const d = await fetch(q('/run?id=' + encodeURIComponent(id))).then((r) => r.json()).catch(() => null);
+  if (mine !== SEQ || !d) return;
+  DETAIL = d;
+  renderPanel();
+}
+
+function renderPanel() {
+  const d = DETAIL;
+  if (!d) return;
+  const n = d.notes || {};
+  const u = d.costUsage;
+  const billed = u ? u.in + u.cw + u.cr + u.out : null;
+  const sites = d.callSites || [];
+  const top = sites.reduce((s, x) => s + x.cost, 0) || 1;
+  $('panel').innerHTML = `
+    <section>
+      <h2>${esc(d.name)} <span class="dim mono">${esc(d.runId)}</span></h2>
+      <dl class="rows">
+        <dt>cost</dt><dd><b>${usd(d.cost)}</b>${d.resumed ? ` <span class="dim">· ${d.resumed} agent(s) served from the resume cache, not re-billed</span>` : ''}</dd>
+        <dt>billed tokens</dt><dd>${tok(billed)} ${u ? `<span class="dim">· ${tok(u.cr)} of it cache reads</span>` : ''}</dd>
+        <dt>record says</dt><dd>${tok(d.recordTokens)} <span class="dim">— final context size, not spend</span></dd>
+        <dt>agents</dt><dd>${d.doneCount}/${d.agentCount}${d.phases?.length ? ` · ${esc(d.phases.join(' → '))}` : ''}</dd>
+        <dt>duration</dt><dd>${d.durationMs ? Math.round(d.durationMs / 60000) + ' min' : '—'} · ${esc(d.status)}</dd>
+        <dt>session</dt><dd class="path">${esc(d.project)} / ${esc(d.session)}</dd>
+      </dl>
+      ${d.unpriced?.length ? `<p class="sentence">Unpriced model(s): ${esc(d.unpriced.join(', '))} — those agents are counted as $0, so this total is a floor.</p>` : ''}
+      ${d.summary ? `<p class="sentence">${esc(d.summary)}</p>` : ''}
+    </section>
+
+    <section>
+      <h2>Where the money went <span class="dim">${sites.length} label${sites.length === 1 ? '' : 's'}</span></h2>
+      <ul class="plain">${sites.map((s) => `<li>
+        <span>${esc(s.label)}<small>${esc(s.model || 'model unrecorded')} · ${s.n} agent${s.n === 1 ? '' : 's'} · ${s.turns} turns${s.resumed ? ` · ${s.resumed} resumed` : ''}</small></span>
+        <span class="num mono">${usd(s.cost)}<small>${Math.round((s.cost / top) * 100)}%</small></span></li>`).join('') || '<li class="dim">not costed yet</li>'}</ul>
+    </section>
+
+    <section>
+      <h2>Output <span class="dim">${d.outputs.length} path${d.outputs.length === 1 ? '' : 's'} named in the result</span></h2>
+      ${d.outputs.length ? `<ul class="plain">${d.outputs.map((p) => `<li><span class="path">${esc(p)}</span></li>`).join('')}</ul>`
+        : '<p class="empty">The result named no file paths.</p>'}
+      <p class="note">Scanned out of the run’s own <code>result</code> — what the workflow said it wrote, not a verified artefact list.</p>
+    </section>
+
+    <section>
+      <h2>How did it go?</h2>
+      ${verdictRow(d.runId, null, n)}
+      <textarea id="note-run" placeholder="What worked, what didn't, what you'd change next time.">${esc(n.text || '')}</textarea>
+      <p class="note">Per label — a note here is keyed on the label, not on the agent id, so it survives a re-run and points at the prompt you’d actually fix. A fan-out that computes its label per item gets one row per item; one that reuses a label gets one row for all of them.</p>
+      <ul class="plain">${sites.map((s) => {
+        const an = (n.agents || {})[s.label] || {};
+        return `<li style="grid-template-columns:1fr"><span>${esc(s.label)} <span class="dim">${usd(s.cost)}</span></span>
+          ${verdictRow(d.runId, s.label, an)}
+          <textarea data-label="${esc(s.label)}" placeholder="What this one did well or badly…">${esc(an.text || '')}</textarea></li>`;
+      }).join('')}</ul>
+    </section>
+
+    ${d.script ? `<section><details><summary>Script (${d.script.length} chars)${d.scriptPath ? ' — ' + esc(d.scriptPath) : ''}</summary>
+      <pre class="script">${esc(d.script)}</pre></details></section>` : ''}`;
+
+  for (const b of $('panel').querySelectorAll('button[data-verdict]')) {
+    b.onclick = () => saveNote(d.runId, b.dataset.label || null, b.dataset.verdict === (b.dataset.current || '') ? '' : b.dataset.verdict, undefined);
+  }
+  const runBox = $('note-run');
+  runBox.onchange = () => saveNote(d.runId, null, undefined, runBox.value);
+  for (const t of $('panel').querySelectorAll('textarea[data-label]')) {
+    t.onchange = () => saveNote(d.runId, t.dataset.label, undefined, t.value);
+  }
+}
+
+function verdictRow(runId, label, cur) {
+  return `<div class="verdicts">` + ['worked', 'mixed', 'failed'].map((v) =>
+    `<button data-verdict="${v}" data-current="${esc(cur.verdict || '')}" ${label ? `data-label="${esc(label)}"` : ''}
+      class="${cur.verdict === v ? 'on' : ''}">${v}</button>`).join('') + `</div>`;
+}
+
+async function saveNote(runId, label, verdict, text) {
+  const body = { runId };
+  if (label) body.label = label;
+  if (verdict !== undefined) body.verdict = verdict;
+  if (text !== undefined) body.text = text;
+  const r = await fetch(q('/note'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) return;
+  const { notes } = await r.json();
+  NOTES[runId] = notes;
+  if (DETAIL && DETAIL.runId === runId) { DETAIL.notes = notes; renderPanel(); }
+  renderRows();
+}
+
+// ---------------------------------------------------------------- thread view
+// A session's title almost never names its subject: the densest "company brain" session on this
+// machine — 148 mentions — is called "Let's surface the hubspot automations work". So the thread is
+// assembled by searching the text of everything, and the handoffs carry the part that exists nowhere
+// else: what was decided, and what must not be tried again.
+function showTab(which) {
+  const thread = which === 'thread';
+  $('tab-runs').className = thread ? '' : 'on';
+  $('tab-thread').className = thread ? 'on' : '';
+  document.querySelector('main').hidden = thread;
+  $('threadview').hidden = !thread;
+  $('searchbox').hidden = !thread;
+  $('hdr').hidden = thread;
+  if (thread) $('q').focus();
+}
+$('tab-runs').onclick = () => showTab('runs');
+$('tab-thread').onclick = () => showTab('thread');
+$('q').onkeydown = (e) => { if (e.key === 'Enter') runSearch(); };
+$('go').onclick = runSearch;
+
+async function runSearch() {
+  const term = $('q').value.trim();          // not `q`: that is the nonce helper
+  if (term.length < 3) return;
+  $('threadview').innerHTML = '<p class="empty">reading every transcript…</p>';
+  // fetch only rejects on a network failure. A bad nonce answers 403 text/plain and a thrown error
+  // answers 500 text/plain — .json() then rejects and the view sits on "reading…" saying nothing.
+  const t = await fetch(q('/thread?q=' + encodeURIComponent(term))).catch(() => null);
+  if (!t || !t.ok) {
+    const why = t ? await t.text().catch(() => '') : 'the server did not answer';
+    $('threadview').innerHTML = `<p class="empty">search failed: ${esc((why || t.status).toString().slice(0, 200))}</p>`;
+    return;
+  }
+  let data; try { data = await t.json(); } catch { $('threadview').innerHTML = '<p class="empty">the server sent something that was not a thread</p>'; return; }
+  renderThread(data);
+}
+
+const mins = (ms) => Math.round((ms || 0) / 60000);
+const bullets = (text, max) => String(text || '').split('\n').filter((l) => l.trim().startsWith('-')).slice(0, max);
+
+function renderThread(t) {
+  if (t.error) { $('threadview').innerHTML = '<p class="empty">' + esc(t.error) + '</p>'; return; }
+  const last = t.handoffs[t.handoffs.length - 1];
+  const parts = [];
+
+  parts.push(`<p class="meta">${t.handoffs.length} handoff${t.handoffs.length === 1 ? '' : 's'} ·
+    ${t.sessions.length} session${t.sessions.length === 1 ? '' : 's'} · ${t.memories.length} memories
+    ${t.tickets.length ? '· ' + t.tickets.map((x) => `<span class="pill">${esc(x.ticket)}</span>`).join('') : ''}</p>`);
+
+  if (last) {
+    parts.push('<h2>Where you left it</h2>');
+    parts.push(`<div class="entry"><span class="when">${esc(last.date || '')}</span> <b>${esc(last.title)}</b>
+      ${last.status ? `<div class="decision">${esc(last.status)}</div>` : ''}
+      ${last.resume ? `<div class="left ok">${bullets(last.resume, 5).map((l) => `<div class="decision">${esc(l)}</div>`).join('') || `<div class="decision">${esc(last.resume.slice(0, 400))}</div>`}</div>` : ''}
+      ${last.failed ? `<div class="left hot"><div class="decision"><b>Do not retry</b></div>${bullets(last.failed, 4).map((l) => `<div class="decision">${esc(l)}</div>`).join('')}</div>` : ''}
+      ${last.open ? `<div class="left"><div class="decision"><b>Still open</b></div>${bullets(last.open, 4).map((l) => `<div class="decision">${esc(l)}</div>`).join('')}</div>` : ''}
+    </div>`);
+  }
+
+  if (t.handoffs.length) {
+    parts.push('<h2>The thread, oldest first</h2>');
+    for (const h of t.handoffs) {
+      const d = bullets(h.decisions, 4);
+      parts.push(`<div class="entry"><span class="when">${esc(h.date || '??')}</span> <b>${esc(h.title)}</b>
+        ${h.dateFromFile ? '' : '<span class="pill">date from file mtime</span>'}
+        ${h.status ? `<div class="decision">${esc(h.status.slice(0, 200))}</div>` : ''}
+        ${d.length ? `<div class="left">${d.map((l) => `<div class="decision">${esc(l)}</div>`).join('')}</div>` : ''}
+      </div>`);
+    }
+  }
+
+  if (t.sessions.length) {
+    parts.push('<h2>Sessions that worked on it</h2>');
+    for (const s of t.sessions) {
+      const det = s.detail;
+      parts.push(`<div class="entry">
+        <span class="when">${esc((s.endedAt || '').slice(0, 10))}</span>
+        <b>${esc(s.title || '(untitled)')}</b>
+        <div class="decision">
+          <span class="pill">${mins(s.activeMs)} min active</span>
+          <span class="pill">${s.sittings} sitting${s.sittings === 1 ? '' : 's'}</span>
+          <span class="pill">${s.mentions} mentions</span>
+          ${(s.workflows || []).length ? `<span class="pill">${s.workflows.length} workflow${s.workflows.length === 1 ? '' : 's'}</span>` : ''}
+          ${(s.skills || []).map((k) => `<span class="pill">${esc(k)}</span>`).join('')}
+        </div>
+        ${det && det.prompts.length ? `<div class="quote">${esc(det.prompts[0].text.slice(0, 260))}</div>` : ''}
+        ${det && det.wrote.length ? `<div class="decision">produced ${det.wrote.length} file${det.wrote.length === 1 ? '' : 's'}: ${det.wrote.slice(0, 5).map((w) => esc(w.path.split(/[\\/]/).pop())).join(', ')}${det.wrote.length > 5 ? ' …' : ''}</div>` : ''}
+        ${det && det.gitCommands.length ? `<div class="decision mono">${esc(det.gitCommands[0].slice(0, 130))}</div>` : ''}
+      </div>`);
+    }
+  }
+
+  if (t.memories.length) {
+    parts.push('<h2>Memories</h2><ul class="plain">');
+    for (const m of t.memories.slice(0, 12))
+      parts.push(`<li><span><span class="pill">${esc(m.type || '?')}</span>${esc(m.file.replace(/\.md$/, ''))}<small>${esc(m.description)}</small></span><span class="num dim">${m.mentions}</span></li>`);
+    parts.push('</ul>');
+  }
+
+  $('threadview').innerHTML = parts.join('');
+}
+
+loadList();
+</script>

@@ -8,8 +8,20 @@
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/workflow-plan-gate.mjs", "pre-tool"],
-            "timeout": 10,
-            "statusMessage": "Checking workflow plan-gate..."
+            "timeout": 900,
+            "statusMessage": "Workflow plan-gate: waiting for your decision in the browser (Approve & run, or Cancel)…"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/workflow-plan-gate.mjs", "prompt"],
+            "timeout": 10
           }
         ]
       }

@@ -95,38 +95,23 @@ Auto-allow retries the worker with the grant expanded, capped at two rounds — 
 
 ## What you see when the launch gate fires
 
-The launch gate is the visible part. It blocks the `Workflow` tool and hands Claude a summary parsed from the *unexecuted* script text — no agents have run yet. Illustrative example:
+The blocked call opens a **graph editor** in your browser and the hook waits for your click. It shows the script as a flowchart — one node per `agent()` call site, diamonds for conditions, hexagons for loops, `×N` badges on fan-outs — with a header stating the number you are approving: `≥ N agents will run`, a static lower bound that never exceeds the real count on any recorded run.
 
-```
-⛔ workflow-gate — approval required before this Workflow runs
+Select a node to read or edit its mission and model tier, then **Approve & run** — that exact call goes through, edits included. **Cancel**, closing the tab, or a timeout does not approve. Edit one line of the script and the fingerprint changes, so the gate fires again. **No stale approvals, ever.**
 
-  Script fingerprint : a1b9f4…c7 (SHA-256 of script text + hook version)
-  Status             : NOT APPROVED
-
-  Static estimate (parsed from script, nothing executed):
-    Phases             : discover → draft → verify → publish
-    agent() calls      : 7 call-sites
-    Model-tier mix     : 2× opus, 4× sonnet, 1× haiku
-    Composition        : pipeline() + parallel() (fan-out in "draft")
-    Worktree isolation : yes
-    Schema outputs     : 3 typed outputs
-
-  This script has not been approved for this exact content.
-  Review the estimate above, then record approval to proceed.
-  Any edit to the script changes the fingerprint and re-gates it.
-```
-
-Approve it, and it runs. Edit one line and rerun — the fingerprint changes, and the gate fires again. **No stale approvals, ever.**
+Not at your desk? After 90 s untouched the hook falls back to chat: say "approved" and the agent records it for that file.
 
 ## How the launch gate works
 
-Honest, mechanical, no magic:
-
 - **By-name `PreToolUse` match.** The hook intercepts the `Workflow` tool's launch call specifically — not every tool, not a broad permission bucket.
 - **Content fingerprinting.** Approval is keyed to `SHA-256(script text + hook version)`. Approve script A, and only byte-identical script A runs.
-- **Static estimate, zero execution.** The hook reads the script *as text* and reports phase names, `agent()` call-site count, model-tier mix, composition, isolation, and schema usage — nothing is run to produce this.
-- **A `SessionStart` hook** announces in-context that the gate is active, so Claude knows the constraint from the first turn, not just when it hits the block.
-- **Fails open.** ~150 lines of plain Node, zero dependencies. On any internal error the gate steps aside rather than wedging your session. Kill switch: set `WORKFLOW_GATE_OFF=1`.
+- **Edits spliced, never re-emitted.** Mission and model edits are applied at AST offsets on the original bytes; a no-op edit stays byte-identical. Control flow is shown, never rewritten.
+- **Override in your own words.** Type "override manual approval" (optionally "for 2h") in chat to lift the gate for that session; "restore manual approval" puts it back. A `UserPromptSubmit` hook reads your prompt directly, so there is no command for the agent to run or forget, and every run under an override says so.
+- **Live run view.** After approval the same tab paints the run onto the graph: per-node state, `k/N done`, last tool called, launched vs. approved.
+- **History and measured cost.** `node plugin/hooks/workflow-plan-gate.mjs history` opens a read-only viewer of every run on the machine, priced from the transcripts' real token usage (cache reads included), with per-run and per-label notes.
+- **Optional model-routing advice.** With `TYPESAFE_API_KEY` set, the editor suggests a tier per agent. Advice only — it never approves anything, and only the extracted skeleton leaves the machine.
+- **A `SessionStart` hook** announces in-context that the gate is active, so Claude knows the constraint from the first turn.
+- **Fails open.** Plain Node, no npm runtime dependencies. On any internal error the gate steps aside rather than wedging your session. Kill switch: `WORKFLOW_GATE_OFF=1`; `WORKFLOW_GATE_NO_UI=1` keeps the text-only flow.
 
 ## Where it fits
 

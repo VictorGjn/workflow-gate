@@ -1,0 +1,1324 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Workflow plan gate</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Parsing runs here, not in the server: acorn from a CDN keeps the plugin at zero node deps. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/acorn/8.14.0/acorn.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<!-- Layered layout for a real flowchart. cytoscape-dagre is not on cdnjs; jsdelivr serves the UMD
+     build (global `cytoscapeDagre`, needs global `dagre` first). Offline: breadthfirst fallback. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* One interactive hue (cobalt) for selection and the primary button. Edges are ink, never accent.
+     Run status has its own trio so "done" can never be confused with "edited" or "selected". */
+  :root {
+    --bg: #f3f4f7; --panel: #fff; --lane: #eaecf1; --ink: #14171f; --dim: #7b8394; --ink-2: #4b5262;
+    --line: #dfe2e9; --edge: #5b6272; --accent: #2f5bea; --accent-ink: #fff;
+    --ok: #1f8a4c; --run: #b7791f; --err: #c6362b; --warn: #b7791f; --visited: #7b8394;
+    --chip: #e9edff; --chip-ink: #2544b8; --mono-bg: #f7f8fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1116; --panel: #171a21; --lane: #14171e; --ink: #e6e8ee; --dim: #7f8797; --ink-2: #b3b9c7;
+            --line: #262b36; --edge: #8a92a6; --accent: #7c9bff; --accent-ink: #0f1116;
+            --ok: #4cc47f; --run: #e0a54a; --err: #f07a6e; --warn: #e0a54a; --visited: #7f8797;
+            --chip: #1f2a4d; --chip-ink: #b7c6ff; --mono-bg: #11141a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr auto;
+         background: var(--bg); color: var(--ink);
+         font: 13.5px/1.45 "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  code, pre, textarea, .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .canvas { position: relative; min-height: 0; }
+  .legend { position: absolute; left: 12px; bottom: 10px; display: grid; gap: 4px; font-size: 11.5px; color: var(--ink-2);
+            background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px; pointer-events: none; }
+  .legend div { display: flex; align-items: center; gap: 8px; }
+  .legend svg { width: 34px; height: 10px; overflow: visible; }
+  .legend path { fill: none; stroke: var(--edge); stroke-width: 1.6; }
+  .legend .back { stroke: var(--run); stroke-dasharray: 6 5; }
+  .legend .err { stroke: var(--err); stroke-dasharray: 6 5; }
+  .legend .data { stroke-dasharray: 2 4; stroke-opacity: .6; }
+  .legend .dia { fill: var(--lane); stroke: var(--edge); stroke-width: 1.2; }
+  .chip { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 11px; background: var(--chip); color: var(--chip-ink);
+          font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .chip.go { cursor: pointer; text-decoration: underline dotted; }
+  aside section + section { margin-top: 18px; }
+  aside section h2 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  aside section h2 .mono, aside section h2 .dim { letter-spacing: 0; text-transform: none; font-weight: 400; }
+  .rows { display: grid; grid-template-columns: 82px 1fr; row-gap: 6px; column-gap: 10px; font-size: 12.5px; align-items: baseline; margin: 0; }
+  .rows dt { color: var(--dim); } .rows dd { margin: 0; } .rows small, .ctx small { display: block; color: var(--dim); font-size: 11px; }
+  .dim { color: var(--dim); }
+  .ctx { display: grid; gap: 6px; font-size: 12.5px; }
+  .ctx div { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: baseline; }
+  .sentence { font-size: 12.5px; color: var(--ink-2); border-left: 2px solid var(--line); padding-left: 10px; margin: 10px 0 0; }
+  .sentence b, .ctx b { color: var(--ink); font-weight: 600; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex;
+           align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 380px; min-height: 0; }
+  #cy { min-height: 0; background: var(--bg); }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 16px; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 14px 0 4px; }
+  textarea, select, input { width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+                            border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  textarea { min-height: 220px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; resize: vertical; }
+  footer { border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 10px;
+           align-items: center; background: var(--panel); }
+  button { font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--ink); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button.primary:disabled { background: var(--dim); border-color: var(--dim); }
+  .grow { flex: 1; }
+  footer a { font-size: 12px; color: var(--dim); text-decoration: none; border-bottom: 1px dotted var(--line); }
+  footer a:hover { color: var(--accent); }
+  .status { font-size: 12px; color: var(--dim); }
+  .status.blocked { color: var(--err); }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11px;
+          border: 1px solid var(--line); color: var(--dim); }
+  .errors { margin: 12px 0 0; padding: 0; list-style: none; font-size: 12px; }
+  .errors li { color: var(--err); cursor: pointer; padding: 3px 0; }
+  .empty { color: var(--dim); font-size: 13px; }
+  .note { font-size: 12px; color: var(--dim); border-left: 2px solid var(--line);
+          padding-left: 10px; margin-top: 16px; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  /* Approved: the plan is frozen. The controls stay visible (the reviewer still reads them)
+     but cannot pretend to change a script that has already been written and fingerprinted. */
+  body.live aside textarea, body.live aside select, body.live aside input,
+  body.live #undo, body.live #redo { pointer-events: none; opacity: .5; }
+  pre.assembled { max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+                  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+                  padding: 8px; font-family: ui-monospace, Menlo, Consolas, monospace;
+                  font-size: 11px; line-height: 1.45; margin: 0; color: var(--dim); }
+</style>
+
+<header>
+  <h1>Workflow plan gate</h1>
+  <span class="meta" id="hdr">loading…</span>
+  <span class="meta dim" id="jev" hidden title="Intent and model routing by Jev (TypeSafe System One). Advice only — the decision is still yours."></span>
+  <span class="grow"></span>
+</header>
+
+<main>
+  <div class="canvas">
+    <div id="cy" style="position:absolute;inset:0"></div>
+    <div class="legend" aria-label="Legend">
+      <div><svg viewBox="0 0 34 10"><path d="M0 5 H30"/></svg>then — runs next</div>
+      <div><svg viewBox="0 0 34 10"><path class="dia" d="M17 0 L34 5 L17 10 L0 5 Z"/></svg>decision — yes / no, the JS predicate verbatim</div>
+      <div><svg viewBox="0 0 34 10"><path class="back" d="M0 5 H30"/></svg>again — loops back</div>
+      <div><svg viewBox="0 0 34 10"><path class="err" d="M0 5 H30"/></svg>on error — catch path</div>
+      <div><svg viewBox="0 0 34 10"><path class="data" d="M0 5 H30"/></svg>reuses an earlier result</div>
+    </div>
+  </div>
+  <aside id="panel"><p class="empty">Select an agent to read and edit its mission.</p></aside>
+</main>
+
+<footer>
+  <button id="undo" disabled>Undo</button>
+  <button id="redo" disabled>Redo</button>
+  <button id="showrun" hidden title="Paint the newest recorded run of this script onto the graph">Show last run</button>
+  <a id="history" hidden target="_blank" rel="noopener noreferrer" title="Every run on this machine, what each cost, and your notes on them">History &amp; cost ↗</a>
+  <span class="grow"></span>
+  <span class="status" id="status"></span>
+  <button id="cancel">Cancel</button>
+  <button id="approve" class="primary" disabled>Approve &amp; run</button>
+</footer>
+
+<script>
+const NONCE = '__NONCE__';
+const SCRIPT_NAME = '__SCRIPT_PATH__'.split(/[\\/]/).pop() || 'script';
+// Filled in by the server when a history daemon is running; blank otherwise, and then no link.
+const HISTORY_URL = '__HISTORY_URL__';
+const q = (p) => p + (p.includes('?') ? '&' : '?') + 'n=' + NONCE;
+
+// ---------------------------------------------------------------- parse
+// Extract the declarative skeleton only: agent() calls, their mission/model/label/phase, and byte
+// spans for the editable leaves. Imperative control flow is read for context but never rewritten.
+function extract(src) {
+  const ast = acorn.parse(src, {
+    ecmaVersion: 'latest', sourceType: 'module',
+    allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true, allowHashBang: true,
+  });
+
+  const nodes = [];
+  const phases = [];
+  const flags = { loop: false, budget: /\bbudget\s*\./.test(src), nested: false };
+  const lit = (v) => (v?.type === 'Literal' ? v.value : null);
+  const isCall = (n, re) => n?.type === 'CallExpression' && n.callee?.type === 'Identifier' && re.test(n.callee.name);
+
+  // meta.phases — the declared execution order.
+  walk(ast, (n) => {
+    if (n.type !== 'Property' || n.key?.name !== 'phases' || n.value?.type !== 'ArrayExpression') return;
+    for (const el of n.value.elements || []) {
+      const t = el?.properties?.find((p) => p.key?.name === 'title');
+      if (t?.value?.value) phases.push(t.value.value);
+    }
+  });
+
+  // Module-scope `const X = [...]` — a fan-out over X is statically sized, and per-item labels can
+  // be resolved when the label is `prefix:${d.slug}` and each element carries a literal `slug`.
+  const arrays = {};
+  for (const st of ast.body) {
+    if (st.type !== 'VariableDeclaration' || st.kind !== 'const') continue;   // a `let` can be resized later
+    for (const d of st.declarations) if (d.id?.type === 'Identifier' && d.init?.type === 'ArrayExpression') arrays[d.id.name] = d.init;
+  }
+
+  // Named functions passed as pipeline()/parallel() stages: agent() calls inside them run once per
+  // item, but sit lexically OUTSIDE the call — v1 saw no fan-out at all there.
+  const stageFns = {};   // fn name → { over, index, call }
+  const fnBodies = {};   // fn name → function node
+  walk(ast, (n) => {
+    if (n.type === 'FunctionDeclaration' && n.id) fnBodies[n.id.name] = n;
+    if (n.type === 'VariableDeclarator' && n.id?.type === 'Identifier' && /Function/.test(n.init?.type || '')) fnBodies[n.id.name] = n.init;
+    if (!isCall(n, /^pipeline$/)) return;
+    n.arguments.slice(1).forEach((a, i) => { if (a.type === 'Identifier') stageFns[a.name] = { over: sourceOf(src, n.arguments[0]), index: i + 1, call: n }; });
+  });
+
+  // phase('X') calls, in statement order — the documented default grouping. Only opts.phase wins.
+  const phaseCalls = [];
+  walk(ast, (n) => { if (isCall(n, /^phase$/) && lit(n.arguments[0])) phaseCalls.push({ at: n.start, title: n.arguments[0].value }); });
+  const phaseAt = (pos) => { let t = null; for (const p of phaseCalls) if (p.at < pos) t = p.title; return t; };
+
+  // Every agent() / workflow() call site. `stack` = enclosing nodes, innermost first.
+  const sites = [];
+  walkWithStack(ast, (n, stack) => {
+    const isAgent = isCall(n, /^agent$/), isWf = isCall(n, /^workflow$/);
+    if (!isAgent && !isWf) return;
+    const [promptArg, optsArg] = n.arguments;
+    const opts = {};
+    if (optsArg?.type === 'ObjectExpression') for (const p of optsArg.properties) if (p.key?.name) opts[p.key.name] = p.value;
+
+    // Mission span: for a template literal we edit the LAST static chunk (the tail after any
+    // ${interpolation}), so shared prefixes stay shared. For a plain string, the whole literal.
+    let missionSpan = null, mission = '', missionKind = null, assembled = '';
+    if (isAgent && promptArg?.type === 'TemplateLiteral') {
+      const tail = promptArg.quasis[promptArg.quasis.length - 1];
+      missionSpan = [tail.start, tail.end];
+      mission = src.slice(tail.start, tail.end);
+      missionKind = promptArg.expressions.length ? 'template-tail' : 'template';
+      // The whole prompt as the agent will receive it, each interpolation as a placeholder. An
+      // emptiness check on the tail alone would block Approve on any prompt ending in ${...}.
+      assembled = promptArg.quasis
+        .map((qq, i) => qq.value.raw + (promptArg.expressions[i] ? '⟨' + sourceOf(src, promptArg.expressions[i]) + '⟩' : ''))
+        .join('');
+    } else if (isAgent && promptArg?.type === 'Literal' && typeof promptArg.value === 'string') {
+      missionSpan = [promptArg.start + 1, promptArg.end - 1];
+      mission = src.slice(missionSpan[0], missionSpan[1]);
+      missionKind = 'string';
+      assembled = promptArg.value;
+    } else if (promptArg) {
+      assembled = '⟨' + sourceOf(src, promptArg) + '⟩';   // computed prompt: shown, never editable
+    }
+
+    // Fan-out: an enclosing parallel()/pipeline() sized by its first argument. ONE template node
+    // with a multiplicity, never N nodes. A module-scope literal array gives a real count.
+    let fanOut = null, stage = null;
+    for (const anc of stack) {
+      if (!isCall(anc, /^(parallel|pipeline)$/)) continue;
+      const first = anc.arguments[0];
+      if (anc.callee.name === 'pipeline') {
+        const idx = anc.arguments.slice(1).findIndex((a) => stack.includes(a));
+        if (idx >= 0) stage = { call: anc, index: idx + 1 };
+      }
+      const fo = sizeFanOut(src, first, arrays, stack);
+      if (!fo) continue;                 // parallel([thunk, thunk]) — each thunk is its own site
+      fanOut = fanOut || fo;
+      if (fanOut.n === null) break;
+    }
+    // …or the call lives in a named function that pipeline() runs per item.
+    if (!fanOut) for (const anc of stack) {
+      const name = anc.type === 'FunctionDeclaration' ? anc.id?.name : null;
+      const asVar = stack.find((s) => s.type === 'VariableDeclarator' && s.init === anc)?.id?.name;
+      const hit = stageFns[name] || stageFns[asVar];
+      if (hit) { fanOut = { n: null, over: hit.over, labels: null }; stage = { call: hit.call, index: hit.index }; break; }
+    }
+
+    // `agent(d.prompt)` inside a fan-out over a literal array: the prompt is not editable (it is
+    // per item) but it IS knowable — resolve every item's prompt so the face and panel show text
+    // instead of "⟨d.prompt⟩" for the one node that launches most of the agents.
+    if (fanOut?.items && promptArg?.type === 'MemberExpression' && promptArg.object?.name === fanOut.param && promptArg.property?.name) {
+      const prop = promptArg.property.name;
+      const per = fanOut.items.map((el) => { const p = el?.type === 'ObjectExpression' ? el.properties.find((q) => q.key?.name === prop) : null; return p ? assembleOf(src, p.value) : null; });
+      if (per.every((x) => x !== null)) { fanOut.prompts = per; assembled = per[0]; }
+    }
+    if (fanOut) delete fanOut.items;
+
+    // Guard: the innermost condition or loop enclosing the call. A guarded site contributes 0 to the
+    // lower bound — counting it as 1 is how v1 reported MORE agents than actually ran.
+    let guard = null;
+    for (let i = 0; i < stack.length; i++) {
+      const anc = stack[i], prev = i === 0 ? n : stack[i - 1];   // the child of anc on our path
+      if (anc.type === 'IfStatement' && prev !== anc.test) { guard = { kind: 'if', text: sourceOf(src, anc.test, 60), line: lineOf(src, anc.start), else: prev === anc.alternate }; break; }
+      if (anc.type === 'ConditionalExpression' && prev !== anc.test) { guard = { kind: 'if', text: sourceOf(src, anc.test, 60), line: lineOf(src, anc.start), else: prev === anc.alternate }; break; }
+      if (anc.type === 'LogicalExpression' && prev === anc.right) { guard = { kind: 'if', text: sourceOf(src, anc.left, 60), line: lineOf(src, anc.start), else: anc.operator === '||' }; break; }
+      if (anc.type === 'SwitchCase') { guard = { kind: 'if', text: anc.test ? 'case ' + sourceOf(src, anc.test, 60) : 'default', line: lineOf(src, anc.start), else: !anc.test }; break; }
+      if (/^(While|DoWhile|For|ForOf|ForIn)Statement$/.test(anc.type) && prev !== anc.test) { guard = { kind: 'loop', text: sourceOf(src, anc.test || anc.right || anc, 60), line: lineOf(src, anc.start), else: false }; flags.loop = true; break; }
+      if (anc.type === 'CatchClause') { guard = { kind: 'if', text: 'catch — only after a failure', line: lineOf(src, anc.start), else: false }; break; }
+    }
+    // A helper function is called ? times (maybe never): agent() inside one is not a sure launch.
+    // Thunks in parallel([...]), .map callbacks, inline stages and IIFEs are the caller's shape and
+    // count normally; a pipeline stage function is already a runtime fan-out.
+    if (!guard && !stage) for (let i = 0; i < stack.length; i++) {
+      const f = stack[i];
+      if (!/Function/.test(f.type)) continue;
+      // Skip nested arrows (`(d) => () => agent()`): what matters is where the outermost one sits.
+      let j = i; while (/Function/.test(stack[j + 1]?.type || '')) j++;
+      const parent = stack[j + 1];
+      const helper = f.type === 'FunctionDeclaration' || stack[j].type === 'FunctionDeclaration'
+        || (parent && /^(VariableDeclarator|Property|AssignmentExpression)$/.test(parent.type));
+      if (!helper) break;
+      const name = stack[j].id?.name || (parent?.type === 'VariableDeclarator' ? parent.id?.name : parent?.key?.name || parent?.left?.name) || '(anonymous)';
+      guard = { kind: 'fn', text: `inside ${name}() — called ? times`, line: lineOf(src, f.start), else: false };
+      break;
+    }
+    // An earlier `if (...) return` / `throw` in the same block can skip everything after it.
+    if (!guard) for (let i = 0; i < stack.length; i++) {
+      const blk = stack[i]; if (blk.type !== 'BlockStatement' && blk.type !== 'Program') continue;
+      const mine = i === 0 ? n : stack[i - 1];
+      const exits = (blk.body || []).filter((st) => st.end <= mine.start && st.type === 'IfStatement' && hasExit(st));
+      if (exits.length) { guard = { kind: 'if', text: 'after early exit: ' + sourceOf(src, exits[exits.length - 1].test, 50), line: lineOf(src, exits[exits.length - 1].start), else: false }; break; }
+      if (/Function/.test(stack[i + 1]?.type || '')) break;   // do not look past our own function
+    }
+
+    const labelDynamic = !!opts.label && opts.label.type !== 'Literal';
+    const optVal = (k) => (opts[k] == null ? null : lit(opts[k]) ?? 'computed');
+    const schema = opts.schema?.type === 'ObjectExpression' ? opts.schema.properties.find((p) => p.key?.name === 'properties')?.value : null;
+    if (isWf) flags.nested = true;
+    const id = 'a' + nodes.length;
+    const node = {
+      id, kind: isWf ? 'workflow' : 'agent',
+      label: isWf ? 'workflow: ' + (lit(promptArg) ?? sourceOf(src, promptArg)) : (lit(opts.label) || (labelDynamic ? sourceOf(src, opts.label) : `agent ${nodes.length + 1}`)),
+      labelDynamic,
+      model: optVal('model') || 'inherited',
+      modelText: opts.model && !lit(opts.model) ? '⟨' + sourceOf(src, opts.model, 60) + '⟩' : null,
+      modelSpan: opts.model?.type === 'Literal' ? [opts.model.start, opts.model.end] : null,
+      effort: optVal('effort'),
+      effortSpan: opts.effort?.type === 'Literal' ? [opts.effort.start, opts.effort.end] : null,
+      isolation: optVal('isolation'), agentType: optVal('agentType'),
+      schemaKeys: schema?.type === 'ObjectExpression' ? schema.properties.map((p) => p.key?.name || p.key?.value).filter(Boolean) : (opts.schema ? ['⟨' + sourceOf(src, opts.schema) + '⟩'] : null),
+      phase: lit(opts.phase) || phaseAt(n.start),
+      mission, missionSpan, missionKind, assembled,
+      fanOut, guard,
+      // What the prompt tells the agent to write. A static grep, honestly labelled as such.
+      writesTo: [...assembled.matchAll(/\b(?:Write|write|save|Save)\b[^\n]{0,60}?((?:[A-Za-z]:\\|\/(?!\/)|⟨)[^\s`'"]*?(?:\.[a-z0-9]{1,5}|⟩))(?=[\s`'".,;:)]|$)/g)].map((m) => m[1]),
+      line: lineOf(src, n.start),
+    };
+    nodes.push(node);
+    sites.push({ node, call: n, promptArg, stack, stage });
+  });
+
+  // ---- data edges: a prior result interpolated into a later prompt --------------------------
+  // Bindings: `const x = await agent(...)`, `let v = await parallel(...)`, `v = await agent(...)`.
+  // The binding's producers are every site inside its initialiser. A .filter(Boolean) anywhere on
+  // that initialiser clears the null warning (parallel()/pipeline() resolve failed thunks to null).
+  const bindings = {};   // name → { producers: [nodeId], nullSafe }
+  const bind = (id, init) => {
+    if (!id || !init) return;
+    const producers = sites.filter((s) => s.call.start >= init.start && s.call.end <= init.end).map((s) => s.node.id);
+    if (!producers.length) return;
+    const nullSafe = !/\b(parallel|pipeline)\s*\(/.test(src.slice(init.start, init.end)) || /\.filter\(\s*Boolean\s*\)/.test(src.slice(init.start, init.end));
+    if (id.type === 'Identifier') bindings[id.name] = { producers, nullSafe };
+    // const [a, b] = await parallel([() => agent(), () => agent()]) — the i-th name is the i-th site.
+    else if (id.type === 'ArrayPattern') id.elements.forEach((el, i) => { if (el?.type === 'Identifier') bindings[el.name] = { producers: producers[i] ? [producers[i]] : producers, nullSafe }; });
+    else if (id.type === 'ObjectPattern') for (const p of id.properties) if (p.value?.type === 'Identifier') bindings[p.value.name] = { producers, nullSafe };
+  };
+  walk(ast, (n) => {
+    if (n.type === 'VariableDeclarator') bind(n.id, n.init);
+    if (n.type === 'AssignmentExpression' && n.left?.type === 'Identifier') bind(n.left, n.right);
+  });
+  // Stage params: in pipeline(items, s1, s2), s2's first parameter is s1's result.
+  const stageParam = (site) => {
+    if (!site.stage || site.stage.index < 2) return null;
+    const fn = site.stack.find((s) => /Function/.test(s.type));
+    return fn?.params?.[0]?.type === 'Identifier' ? fn.params[0].name : null;
+  };
+
+  // Module-scope constants with a literal/template initialiser — the shared preamble every agent
+  // receives, which appeared nowhere in the UI before.
+  const consts = {};
+  for (const st of ast.body) if (st.type === 'VariableDeclaration') for (const d of st.declarations) {
+    const a = d.id?.type === 'Identifier' ? assembleOf(src, d.init) : null;
+    if (a !== null) consts[d.id.name] = a;
+  }
+
+  // Where a prompt can come from, for matching only: module-scope consts and helper functions.
+  const env = { vars: {}, fns: {} };
+  for (const st of ast.body) {
+    if (st.type === 'VariableDeclaration') for (const d of st.declarations) {
+      if (d.id?.type !== 'Identifier' || !d.init) continue;
+      if (/Function/.test(d.init.type)) env.fns[d.id.name] = returnsOf(d.init);
+      else env.vars[d.id.name] = d.init;
+    }
+    if (st.type === 'FunctionDeclaration' && st.id) env.fns[st.id.name] = returnsOf(st);
+  }
+  for (const site of sites) site.node.matchChunks = [...new Set([
+    ...literalsOf(site.promptArg, env),
+    ...cook(site.node.assembled).split(/⟨[^⟩]*⟩/),
+    ...(site.node.fanOut?.prompts || []).flatMap((p) => cook(p).split(/⟨[^⟩]*⟩/)),
+  ].map((x) => x.trim()).filter((x) => x.length >= 24))];
+
+  const edges = [];
+  const addEdge = (from, to, via, nullSafe) => {
+    if (from === to || edges.some((e) => e.source === from && e.target === to)) return;
+    edges.push({ id: from + '>' + to, source: from, target: to, kind: 'data', via, mayContainNull: !nullSafe });
+  };
+  for (const site of sites) {
+    const expr = site.promptArg?.type === 'TemplateLiteral' ? site.promptArg.expressions : (site.promptArg ? [site.promptArg] : []);
+    const names = new Set();
+    for (const e of expr) walk(e, (x) => { if (x.type === 'Identifier') names.add(x.name); });
+    for (const name of names) {
+      const b = bindings[name];
+      if (b) for (const p of b.producers) addEdge(p, site.node.id, name, b.nullSafe);
+    }
+    const param = stageParam(site);
+    if (param && names.has(param)) {
+      const prevStage = sites.filter((s) => s.stage?.call === site.stage.call && s.stage.index === site.stage.index - 1);
+      for (const p of prevStage) addEdge(p.node.id, site.node.id, param, false);
+    }
+    // CONTEXT — what each interpolation resolves to. Derived, never fabricated: upstream result,
+    // shared constant (with a preview), per-item value, or "runtime" when we cannot say.
+    site.node.context = expr.map((e) => {
+      const text = sourceOf(src, e, 48);
+      // The first identifier in the expression that we can name (`JSON.stringify(survey)` → survey).
+      const ids = []; walk(e, (x) => { if (x.type === 'Identifier') ids.push(x.name); });
+      const name = ids.find((k) => bindings[k]) || ids.find((k) => consts[k] !== undefined) || ids.find((k) => k === param) || ids.find((k) => site.node.fanOut?.param === k) || ids[0];
+      if (name && bindings[name]) return { expr: text, kind: 'upstream', producers: bindings[name].producers, mayContainNull: !bindings[name].nullSafe };
+      if (name && consts[name] !== undefined) return { expr: text, kind: 'const', preview: consts[name].replace(/\s+/g, ' ').trim().slice(0, 90), chars: consts[name].length };
+      if (name && param === name) return { expr: text, kind: 'upstream', producers: sites.filter((s) => s.stage?.call === site.stage.call && s.stage.index === site.stage.index - 1).map((s) => s.node.id), mayContainNull: true };
+      if (name && site.node.fanOut?.over && (site.node.fanOut.param === name || /^\w+$/.test(name) && site.stack.some((s) => /Function/.test(s.type) && s.params?.some((p) => p.name === name)))) return { expr: text, kind: 'per-item' };
+      return { expr: text, kind: 'runtime' };
+    });
+  }
+
+  // Lower bound on agents actually launched: guarded sites count 0, static fan-outs count n,
+  // runtime fan-outs count 1 (the list may be empty — but then so is the number to worry about).
+  const minAgents = nodes.reduce((s, n) => s + (n.guard ? 0 : (n.fanOut ? (n.fanOut.n ?? 1) : 1)), 0);
+  const flow = buildFlow(ast, sites, fnBodies, src);
+  return { nodes, edges, phases, flags, minAgents, flow };
+}
+
+// ---------------------------------------------------------------- control flow
+// The flowchart: what runs after what, where the script decides, where it loops back, where it
+// stops. Built from the statement structure, not from data edges — a script whose agents hand
+// results over through files has no data edge at all, and used to render as one flat row.
+// One diamond per if/ternary/&&/switch/loop, shared by every site under it. Helpers are inlined at
+// their call sites (a helper called twice is drawn once, both callers pointing in). `return` inside
+// a thunk ends the thunk; at top level it ends the run; break/continue bind to the innermost loop.
+// ponytail: recursion is cut at the second entry; generators and labelled statements are not modelled.
+function buildFlow(ast, sites, fnBodies, src) {
+  const siteOf = new Map(sites.map((s) => [s.call, s.node.id]));
+  const nodes = [], edges = [], seen = new Set();
+  const addNode = (id, kind, label, line) => { if (!nodes.some((x) => x.id === id)) nodes.push({ id, kind, label, line }); return id; };
+  const dropNode = (id) => { const i = nodes.findIndex((x) => x.id === id); if (i >= 0) nodes.splice(i, 1); };
+  const link = (froms, tos, kind = 'flow') => {
+    for (const f of froms) for (const t of tos) {
+      const key = f.id + '>' + t + '|' + (f.label || '');
+      if (f.id === t || seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ id: 'f' + edges.length, source: f.id, target: t, label: f.label || '', kind });
+    }
+  };
+  const S = (id, label) => ({ id, label });          // a sink, and the label its outgoing edge carries
+  const NONE = { sources: [], sinks: [] };
+  const empty = (f) => !f || (!f.sources.length && !f.sinks.length && !f.exit);
+  const seq = (parts) => {
+    let out = null;
+    for (const p of parts) {
+      if (empty(p)) continue;
+      if (!out) { out = { sources: p.sources, sinks: p.sinks, exit: p.exit }; continue; }
+      link(out.sinks, p.sources);
+      // A part with no sources (a bare `return`, a `break`) consumes nothing: the sinks before it
+      // are still the live ones, and the exit marker tells the block where to send them.
+      out = { sources: out.sources, sinks: p.sources.length ? p.sinks : [...out.sinks, ...p.sinks], exit: p.exit };
+    }
+    return out || NONE;
+  };
+  const par = (parts) => (parts.length === 1 ? parts[0] : { sources: parts.flatMap((p) => p.sources), sinks: parts.flatMap((p) => p.sinks) });
+  const text = (n, max = 44) => sourceOf(src, n, max);
+  const inlining = new Set();
+  // Where a construct's leftovers go when it exits: return/throw leave the function (or the run),
+  // break/continue go to the loop. Top-level `exits` is the way to END.
+  const redirect = (ctx, kind, sinks) => {
+    if (!sinks.length) return;
+    if (kind === 'break') (ctx.loop ? ctx.loop.breaks : ctx.exits).push(...sinks);
+    else if (kind === 'continue') (ctx.loop ? ctx.loop.continues : ctx.exits).push(...sinks);
+    else ctx.exits.push(...(kind === 'throw' ? sinks.map((s) => S(s.id, s.label ? s.label + ' · error' : 'error')) : sinks));
+  };
+  // A block runs its statements in order; the first exit ends it.
+  const block = (stmts, ctx) => {
+    let out = null;
+    for (const st of stmts) {
+      const f = flow(st, ctx);
+      if (empty(f)) continue;
+      const cur = seq([out, f]);
+      if (f.exit) { redirect(ctx, f.exit, cur.sinks); return { sources: cur.sources, sinks: [], exit: f.exit }; }
+      out = cur;
+    }
+    return out || NONE;
+  };
+  // One branch of a decision `d`; `label` is the edge leaving the diamond. Pushes what continues.
+  const branch = (d, label, f, ctx, sinks) => {
+    if (!f || empty(f)) { sinks.push(S(d, label)); return; }
+    if (f.sources.length) { link([S(d, label)], f.sources); if (f.exit) redirect(ctx, f.exit, f.sinks); else sinks.push(...f.sinks); }
+    else if (f.exit) redirect(ctx, f.exit, [S(d, label)]);
+    else sinks.push(S(d, label));
+  };
+  const fn = (f) => {
+    if (inlining.has(f)) return NONE;
+    inlining.add(f);
+    const ctx = { exits: [], loop: null };
+    const b = f.body?.type === 'BlockStatement' ? block(f.body.body, ctx) : flow(f.body, ctx);
+    inlining.delete(f);
+    return { sources: b.sources, sinks: [...b.sinks, ...ctx.exits] };
+  };
+  const isLoopOver = (n) => n.type === 'ForOfStatement' || n.type === 'ForInStatement';
+
+  function flow(n, ctx) {
+    if (!n || typeof n.type !== 'string') return NONE;
+    if (siteOf.has(n)) return { sources: [siteOf.get(n)], sinks: [S(siteOf.get(n))] };
+    switch (n.type) {
+      case 'Program': case 'BlockStatement': return block(n.body, ctx);
+      case 'FunctionDeclaration': return NONE;                        // runs when called — see CallExpression
+      case 'VariableDeclarator': return /Function/.test(n.init?.type || '') ? NONE : flow(n.init, ctx);
+      case 'FunctionExpression': case 'ArrowFunctionExpression': return fn(n);
+      case 'ReturnStatement': return { ...flow(n.argument, ctx), exit: 'return' };
+      case 'ThrowStatement': return { ...flow(n.argument, ctx), exit: 'throw' };
+      case 'BreakStatement': return { ...NONE, exit: 'break' };
+      case 'ContinueStatement': return { ...NONE, exit: 'continue' };
+      case 'AwaitExpression': return flow(n.argument, ctx);
+      case 'IfStatement': case 'ConditionalExpression': {
+        const d = addNode('d' + n.start, 'decision', text(n.test), lineOf(src, n.start)), sinks = [];
+        branch(d, 'yes', flow(n.consequent, ctx), ctx, sinks);
+        branch(d, 'no', n.alternate ? flow(n.alternate, ctx) : null, ctx, sinks);
+        if (sinks.length === 2 && sinks.every((s) => s.id === d)) { dropNode(d); return NONE; }   // nothing under it
+        return { sources: [d], sinks };
+      }
+      case 'LogicalExpression': {
+        const l = flow(n.left, ctx), yes = n.operator === '||' ? 'no' : 'yes', no = yes === 'yes' ? 'no' : 'yes';
+        const d = addNode('d' + n.start, 'decision', text(n.left), lineOf(src, n.start)), sinks = [];
+        branch(d, yes, flow(n.right, ctx), ctx, sinks);
+        if (sinks.length === 1 && sinks[0].id === d) { dropNode(d); return l; }
+        sinks.push(S(d, no));
+        return seq([l, { sources: [d], sinks }]);
+      }
+      case 'WhileStatement': case 'DoWhileStatement': case 'ForStatement': case 'ForOfStatement': case 'ForInStatement': {
+        const label = isLoopOver(n) ? `each ${text(n.left, 22).replace(/^(const|let|var) /, '')} of ${text(n.right, 26)}` : n.test ? text(n.test) : 'loop';
+        const d = addNode('d' + n.start, 'loop', label, lineOf(src, n.start));
+        const lctx = { ...ctx, loop: { breaks: [], continues: [] } };
+        const b = flow(n.body, lctx);
+        if (!b.sources.length && !lctx.loop.breaks.length && !lctx.loop.continues.length) { dropNode(d); return NONE; }
+        link([S(d, isLoopOver(n) ? 'next' : 'yes')], b.sources);
+        link([...b.sinks, ...lctx.loop.continues].map((s) => S(s.id, s.label || 'again')), [d], 'back');
+        return { sources: [d], sinks: [S(d, 'done'), ...lctx.loop.breaks] };
+      }
+      case 'SwitchStatement': {
+        const d = addNode('d' + n.start, 'decision', text(n.discriminant), lineOf(src, n.start)), sinks = [];
+        const sctx = { ...ctx, loop: { breaks: [], continues: ctx.loop ? ctx.loop.continues : ctx.exits } };
+        let any = false, hasDefault = false;
+        for (const c of n.cases) {
+          if (!c.test) hasDefault = true;
+          const f = block(c.consequent, sctx);
+          if (empty(f)) continue;
+          any = true;
+          branch(d, c.test ? 'case ' + text(c.test, 20) : 'default', f, sctx, sinks);
+        }
+        if (!any) { dropNode(d); return NONE; }
+        sinks.push(...sctx.loop.breaks);
+        if (!hasDefault) sinks.push(S(d, 'else'));
+        return { sources: [d], sinks };
+      }
+      case 'TryStatement': {
+        const b = flow(n.block, ctx), h = n.handler ? flow(n.handler.body, ctx) : NONE;
+        // Any agent inside the try can be the one that throws; the first is enough to show the path.
+        if (h.sources.length && b.sources.length) link(b.sources.map((id) => S(id, 'error')), h.sources, 'error');
+        return seq([par([b, h]), n.finalizer ? flow(n.finalizer, ctx) : null]);
+      }
+      case 'CallExpression': {
+        const c = n.callee;
+        if (c.type === 'Identifier') {
+          if (c.name === 'pipeline') return seq(n.arguments.slice(1).map((a) => flow(a, ctx)));   // stages run in order
+          const f = fnBodies[c.name];
+          if (f && /Function/.test(f.type)) return seq([par(n.arguments.map((a) => flow(a, ctx))), fn(f)]);
+        }
+        if (c.type === 'MemberExpression' && c.property?.name === 'then') return seq([flow(c.object, ctx), ...n.arguments.map((a) => flow(a, ctx))]);
+        return par([flow(c, ctx), ...n.arguments.map((a) => flow(a, ctx))].filter((p) => !empty(p)));
+      }
+      default: {
+        const parts = [];
+        for (const k in n) { const v = n[k]; if (Array.isArray(v)) { for (const x of v) parts.push(flow(x, ctx)); } else if (v && typeof v.type === 'string') parts.push(flow(v, ctx)); }
+        return par(parts.filter((p) => !empty(p)));
+      }
+    }
+  }
+
+  const top = { exits: [], loop: null };
+  const main = block(ast.body, top);
+  addNode('start', 'start', 'start', 0); addNode('end', 'end', 'end', 0);
+  link([S('start')], main.sources);
+  link([...main.sinks, ...top.exits], ['end']);
+  // A site the flow never reached — a helper nobody calls, code it could not follow — hangs off
+  // start with a '?', so it is on the page and honestly unexplained rather than missing.
+  const reached = new Set(edges.flatMap((e) => [e.source, e.target]));
+  for (const s of sites) if (!reached.has(s.node.id)) link([S('start', '?')], [s.node.id]);
+  return { nodes, edges };
+}
+
+// One fan-out site, sized by the collection expression it iterates.
+function sizeFanOut(src, first, arrays, stack) {
+  if (!first) return { n: null, over: '(?)', labels: null };
+  // An inline array of thunks is N distinct call sites, each running once — not a fan-out. v1
+  // stamped ×3 on each of them, which is how it reported 17 agents for a run of 12.
+  if (first.type === 'ArrayExpression') return null;
+  // `X.map(cb)` over a module-scope literal array: count = X.length, labels resolved per element
+  // when the label template is `prefix:${cb-param.prop}` and each element has a literal `prop`.
+  const isMap = first.type === 'CallExpression' && first.callee?.type === 'MemberExpression' && first.callee.property?.name === 'map';
+  const base = isMap ? first.callee.object : first;
+  if (base.type === 'Identifier' && arrays[base.name]) {
+    const arr = arrays[base.name];
+    let labels = null;
+    const cb = isMap ? first.arguments[0] : null;
+    const param = cb?.params?.[0]?.name;
+    // The label opt inside this fan-out, if it is `lit:${param.prop}`.
+    let labelTpl = null;
+    if (cb) walk(cb, (x) => { if (x.type === 'Property' && x.key?.name === 'label' && x.value?.type === 'TemplateLiteral') labelTpl = labelTpl || x.value; });
+    const ex = labelTpl?.expressions?.[0];
+    if (param && labelTpl && labelTpl.expressions.length === 1 && ex.type === 'MemberExpression' && ex.object?.name === param && ex.property?.name) {
+      const prop = ex.property.name;
+      labels = arr.elements.map((el) => {
+        const p = el?.type === 'ObjectExpression' ? el.properties.find((q) => q.key?.name === prop) : null;
+        return p?.value?.type === 'Literal' ? labelTpl.quasis[0].value.cooked + p.value.value + labelTpl.quasis[1].value.cooked : null;
+      });
+      if (labels.some((l) => l === null)) labels = null;
+    }
+    return { n: arr.elements.length, over: base.name, labels, items: arr.elements, param };
+  }
+  return { n: null, over: sourceOf(src, base), labels: null };
+}
+
+// A template or string literal as the agent will receive it, interpolations as ⟨placeholders⟩.
+function assembleOf(src, node) {
+  if (node?.type === 'TemplateLiteral') return node.quasis.map((qq, i) => qq.value.raw + (node.expressions[i] ? '⟨' + sourceOf(src, node.expressions[i]) + '⟩' : '')).join('');
+  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
+  return null;
+}
+
+// Source escapes → the characters the agent actually received. Only matching needs this: the panel
+// still shows source text, and the mission splice still depends on it BEING source text.
+// Unlisted escapes keep their backslash on purpose: C:\Users survives, and a string prompt (which
+// acorn already cooked) can pass through here again without losing a character.
+const COOK = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0', '\\': '\\', '`': '`', "'": "'", '"': '"', $: '$' };
+const cook = (s) => String(s).replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (m, c) =>
+  (c[0] === 'u' || c[0] === 'x') ? String.fromCodePoint(parseInt(c.replace(/[ux{}]/g, ''), 16)) : (COOK[c] ?? ('\\' + c)));
+
+// Every literal fragment a prompt expression can yield, wherever it hides. Checked against the 21
+// recorded runs on this machine: prompts are as often `a` + `b` + `c` or `promptFor(x)` as they are
+// one template literal, and for those the node's `assembled` is a 40-char source snippet — enough
+// to look at, nothing to match a running agent against. Used ONLY for matching: `assembled` stays
+// source text so the mission tail can still be spliced back byte-for-byte.
+function returnsOf(fn) {
+  if (fn.body && fn.body.type !== 'BlockStatement') return [fn.body];   // arrow with an expression body
+  const out = [];
+  (function w(x) {
+    if (!x || typeof x.type !== 'string') return;
+    if (x !== fn && /Function/.test(x.type)) return;                    // not a nested function's returns
+    if (x.type === 'ReturnStatement' && x.argument) out.push(x.argument);
+    for (const k in x) { const v = x[k]; if (Array.isArray(v)) v.forEach(w); else if (v && typeof v.type === "string") w(v); }
+  })(fn);
+  return out;
+}
+function literalsOf(node, env, depth = 0) {
+  if (!node || depth > 4) return [];
+  const rec = (x) => literalsOf(x, env, depth + 1);
+  switch (node.type) {
+    case 'Literal': return typeof node.value === 'string' ? [node.value] : [];
+    case 'TemplateLiteral': return node.quasis.map((q) => q.value.cooked ?? cook(q.value.raw));
+    case 'BinaryExpression': return node.operator === '+' ? [...rec(node.left), ...rec(node.right)] : [];
+    case 'ConditionalExpression': return [...rec(node.consequent), ...rec(node.alternate)];
+    case 'Identifier': return env.vars[node.name] ? rec(env.vars[node.name]) : [];
+    case 'CallExpression': return node.callee?.type === 'Identifier' && env.fns[node.callee.name]
+      ? env.fns[node.callee.name].flatMap(rec) : [];
+    default: return [];
+  }
+}
+
+function sourceOf(src, node, max = 40) {
+  if (!node) return '(?)';
+  const t = src.slice(node.start, node.end).replace(/\s+/g, ' ');
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+function lineOf(src, i) { return src.slice(0, i).split('\n').length; }
+// Does this statement's own body (not a nested function) return or throw?
+function hasExit(st) {
+  let hit = false;
+  (function w(x) {
+    if (hit || !x || typeof x.type !== 'string' || /Function/.test(x.type)) return;
+    if (x.type === 'ReturnStatement' || x.type === 'ThrowStatement') { hit = true; return; }
+    for (const k in x) { const v = x[k]; if (Array.isArray(v)) v.forEach(w); else if (v && typeof v.type === 'string') w(v); }
+  })(st.consequent);
+  if (!hit && st.alternate) (function w(x) {
+    if (hit || !x || typeof x.type !== 'string' || /Function/.test(x.type)) return;
+    if (x.type === 'ReturnStatement' || x.type === 'ThrowStatement') { hit = true; return; }
+    for (const k in x) { const v = x[k]; if (Array.isArray(v)) v.forEach(w); else if (v && typeof v.type === 'string') w(v); }
+  })(st.alternate);
+  return hit;
+}
+
+function walk(node, fn) {
+  if (!node || typeof node.type !== 'string') return;
+  fn(node);
+  for (const k in node) {
+    const v = node[k];
+    if (Array.isArray(v)) v.forEach((c) => walk(c, fn));
+    else if (v && typeof v.type === 'string') walk(v, fn);
+  }
+}
+function walkWithStack(node, fn, stack = []) {
+  if (!node || typeof node.type !== 'string') return;
+  fn(node, stack);
+  const next = [node, ...stack];
+  for (const k in node) {
+    const v = node[k];
+    if (Array.isArray(v)) v.forEach((c) => walkWithStack(c, fn, next));
+    else if (v && typeof v.type === 'string') walkWithStack(v, fn, next);
+  }
+}
+
+// ---------------------------------------------------------------- splice
+// Byte splicing, not re-printing. Untouched regions are literally never re-emitted, so a no-op edit
+// is byte-identical by construction. The gate fingerprints hash(script text) — anything less exact
+// re-triggers the gate forever.
+//
+// The mission textarea is a TRUST BOUNDARY: free human text becomes executable JS. Splicing it raw
+// is not a rough edge, it is three bugs — an apostrophe or newline writes a SyntaxError to the
+// user's file; a backtick ends the template early; and `${process.env.X}` typed as prose becomes a
+// LIVE interpolation in a script the gate then marks approved. Escape for the literal kind we are
+// splicing into. Verified against all four in the format-variant harness.
+function escapeForSpan(text, kind) {
+  if (kind === 'string') {
+    // JSON.stringify handles quotes, backslashes, newlines and control chars; drop its own quotes
+    // because the source's delimiters stay in place around the span.
+    const json = JSON.stringify(text).slice(1, -1);
+    // JSON only escapes ", so a source using ' needs its own delimiter escaped too. Escaping both
+    // is always valid JS regardless of which delimiter the source used.
+    return json.replace(/'/g, "\\'");
+  }
+  // Template literal: a backtick would close it, and ${ would open an interpolation. Backslash must
+  // go first or it would double-escape what we add after.
+  return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+}
+
+function applyEdits(src, nodes, edits) {
+  const ops = [];
+  for (const n of nodes) {
+    const e = edits[n.id];
+    if (!e) continue;
+    if (e.mission !== undefined && n.missionSpan) ops.push({ span: n.missionSpan, text: escapeForSpan(e.mission, n.missionKind) });
+    // Tier and effort are bare identifiers-in-quotes; a value outside [a-z0-9.-] would be a bug
+    // in the select, not in the script, so refuse rather than escape.
+    for (const [k, span] of [['model', n.modelSpan], ['effort', n.effortSpan]]) {
+      if (e[k] === undefined || !span || !/^[a-z0-9.-]+$/i.test(e[k])) continue;
+      const quote = src[span[0]];   // reuse the source's own delimiter, never emit one
+      ops.push({ span, text: quote + e[k] + quote });
+    }
+  }
+  ops.sort((a, b) => b.span[0] - a.span[0]);   // right-to-left keeps earlier offsets valid
+  let out = src;
+  for (const o of ops) out = out.slice(0, o.span[0]) + o.text + out.slice(o.span[1]);
+  return out;
+}
+
+// ---------------------------------------------------------------- state
+let SRC = '', GRAPH = null, cy = null, HDR = '';
+let ADVICE = null;            // Jev's intent + tier suggestions, keyed by node id; null until (and unless) it answers
+let edits = {};                 // id -> {mission?, model?}
+let history = [], future = [];
+
+const $ = (id) => document.getElementById(id);
+const truncate = (s, n) => { const t = (s || '').trim().replace(/\s+/g, ' '); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+// First sentence after any leading ⟨chips⟩: cut at . ? ! followed by space/end, or at a blank line.
+const firstSentence = (s) => {
+  const t = (s || '').replace(/^(\s*⟨[^⟩]*⟩\s*)+/, '').trim();
+  const m = t.match(/^[\s\S]*?[.?!](?=\s|$)|^[^\n]*?(?=\n\s*\n)|^[\s\S]*$/);
+  return (m ? m[0] : t).replace(/\s+/g, ' ').trim();
+};
+const currentMission = (n) => (edits[n.id]?.mission !== undefined ? edits[n.id].mission : n.mission);
+// The full prompt as the agent will receive it, with the reviewer's pending tail edit applied.
+// Everything user-facing reads THIS, not the editable fragment — active verification over a
+// fragment is theatre, and on the real scripts the fragment was 16% of the prompt.
+const assembledNow = (n) => (n.missionSpan && edits[n.id]?.mission !== undefined
+  ? n.assembled.slice(0, n.assembled.length - n.mission.length) + edits[n.id].mission
+  : n.assembled);
+const currentModel = (n) => (edits[n.id]?.model !== undefined ? edits[n.id].model : n.model);
+const currentEffort = (n) => (edits[n.id]?.effort !== undefined ? edits[n.id].effort : n.effort);
+
+function pushHistory() { history.push(JSON.stringify(edits)); future = []; refreshButtons(); }
+function undo() { if (!history.length) return; future.push(JSON.stringify(edits)); edits = JSON.parse(history.pop()); afterEdit(); }
+function redo() { if (!future.length) return; history.push(JSON.stringify(edits)); edits = JSON.parse(future.pop()); afterEdit(); }
+function afterEdit() { syncNodeLabels(); renderPanel(cy.$('node:selected').first()); refreshButtons(); }
+
+// ---------------------------------------------------------------- render
+function build() {
+  const elements = [];
+  for (const n of GRAPH.nodes) {
+    elements.push({ data: { id: n.id, label: nodeLabel(n), kind: 'agent', guarded: !!n.guard, icon: iconOf(n) } });
+  }
+  // The flowchart: decisions, loops, start/end and the "then" edges between them.
+  for (const n of GRAPH.flow.nodes) elements.push({ data: { id: n.id, label: n.label, kind: n.kind, line: n.line } });
+  for (const e of GRAPH.flow.edges) elements.push({ data: { id: e.id, source: e.source, target: e.target, kind: e.kind, label: e.label } });
+  // A data edge — a prior result interpolated into this prompt — is drawn only where the flow does
+  // not already say "then" between the same two nodes: it then means "reuses an earlier result".
+  const flowPairs = new Set(GRAPH.flow.edges.map((e) => e.source + '>' + e.target));
+  for (const e of GRAPH.edges) {
+    if (flowPairs.has(e.source + '>' + e.target)) continue;
+    elements.push({ data: { id: e.id, source: e.source, target: e.target, kind: 'data', label: e.via + (e.mayContainNull ? '?' : '') } });
+  }
+
+  if (typeof cytoscapeDagre !== 'undefined' && !cytoscape.__dagre) { cytoscape.use(cytoscapeDagre); cytoscape.__dagre = true; }
+  cy = cytoscape({ container: $('cy'), elements, style: buildStyle() });
+  // Theme flip with the tab open used to leave the canvas in the old palette: tokens are read once.
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => cy.style(buildStyle()));
+  // "If this does not fire, what else silently does not happen?" — hover a conditional node.
+  cy.on('mouseover', 'node[?guarded]', (e) => e.target.successors().addClass('at-risk'));
+  cy.on('mouseout', 'node[?guarded]', () => cy.elements().removeClass('at-risk'));
+
+  // Auto-layout ONCE, then freeze: positions become the reviewer's own state. Layered (dagre) so
+  // the flow reads top-down with loops as back-edges; breadthfirst from `start` when the CDN is
+  // unreachable. Ceiling: dagre's crossing minimisation is heuristic past ~60 nodes.
+  const layout = cytoscape.__dagre
+    ? { name: 'dagre', rankDir: 'TB', nodeSep: 30, rankSep: 48, edgeSep: 14, fit: true, padding: 28 }
+    : { name: 'breadthfirst', directed: true, roots: cy.$('#start'), spacingFactor: 1.05, fit: true, padding: 28 };
+  cy.layout(layout).run();
+  if (cy.zoom() > 1.2) { cy.zoom(1.2); cy.center(); }   // don't blow a 2-node graph up to fill the canvas
+
+  cy.on('tap', 'node', (e) => select(e.target));
+  cy.on('tap', (e) => { if (e.target === cy) { cy.$(':selected').unselect(); renderPanel(null); } });
+}
+
+// ---------------------------------------------------------------- node face
+// What the reviewer reads without clicking: an icon for what the agent does, its purpose (the first
+// sentence of the prompt as the agent receives it), and model · effort. Everything else is panel.
+const ICON_PATHS = {
+  review: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m21 21-5.2-5.2M8 10.5l1.8 1.8 3.7-3.8"/>',
+  test: '<path d="M9 3h6M10 3v6L4.5 19a1.5 1.5 0 0 0 1.3 2.2h12.4a1.5 1.5 0 0 0 1.3-2.2L14 9V3"/>',
+  research: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  plan: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>',
+  synth: '<path d="M3 4h18l-7 8v6l-4 2v-8z"/>',
+  ship: '<path d="M5 13c-1 2-1 5-1 6 1 0 4 0 6-1M14 4c3-1 6 0 6 0s1 3 0 6c-2 4-6 7-8 8l-4-4c1-2 4-6 6-10z"/><circle cx="15" cy="9" r="1.5"/>',
+  build: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  workflow: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4v7.5"/>',
+  agent: '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6"/>',
+};
+// Label first (it names the call site), then the prompt. `build` last: "write" is in most prompts.
+const ICON_RULES = [
+  ['review', /review|critique|verif|audit|check|judge|revue|relire|valid|adversar|critic/i],
+  ['test', /\btests?\b|\bqa\b|\bteste/i],
+  ['research', /research|survey|search|scrape|fetch|explore|collect|recherche|donn[ée]es|\bread\b|\blire\b/i],
+  ['plan', /\bplan|design|architect|\bspec|arbitr|roadmap/i],
+  ['synth', /summar|synthes|merge|consolidat|report|aggregat|r[ée]sum|\bfinal|bilan|digest/i],
+  ['ship', /deploy|ship|release|publish|integr|commit/i],
+  ['build', /implement|build|\bcode\b|\bfix|refactor|develop|\bdev\b|corrig|scaffold|migrat|write|\bedit/i],
+];
+function iconOf(n) {
+  if (n.kind === 'workflow') return 'workflow';
+  const name = n.label, body = assembledNow(n).replace(/⟨[^⟩]*⟩/g, ' ').slice(0, 400);
+  for (const [k, re] of ICON_RULES) if (re.test(name)) return k;
+  for (const [k, re] of ICON_RULES) if (re.test(body)) return k;
+  return 'agent';
+}
+const iconUri = (name, color) => 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name] || ICON_PATHS.agent}</svg>`);
+// The purpose: the first sentence the agent reads, after any ⟨shared context⟩; a second one when the
+// first is short ("You are the reviewer." says nothing on its own).
+function purposeOf(n) {
+  const t = (assembledNow(n) || '').replace(/⟨[^⟩]*⟩/g, '…').replace(/\s+/g, ' ').replace(/^[…\s]+/, '').trim();
+  const parts = t.split(/(?<=[.?!:])\s+/);
+  let out = parts[0] || '';
+  if (out.length < 45 && parts[1]) out += ' ' + parts[1];
+  return truncate(out, 86) || '(no prompt text)';
+}
+
+function buildStyle() {
+  const mono = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+  const ink2 = css('--ink-2');
+  const labelled = (e) => (e.data('label') ? 1 : 0);
+  return [
+    { selector: 'node[kind="agent"]', style: {
+      'shape': 'round-rectangle', 'width': 262, 'height': 84, 'label': 'data(label)',
+      'text-wrap': 'wrap', 'text-max-width': 204, 'text-valign': 'center', 'text-halign': 'center', 'text-margin-x': 16, 'font-size': 11,
+      'font-family': '"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif', 'line-height': 1.4,
+      'text-justification': 'left', 'min-zoomed-font-size': 7,
+      'background-color': css('--panel'), 'border-width': 1, 'border-color': css('--line'),
+      'background-image': (e) => iconUri(e.data('icon'), ink2), 'background-width': 22, 'background-height': 22,
+      'background-position-x': '12px', 'background-position-y': '50%', 'background-clip': 'none',
+      'color': css('--ink'), 'padding': 8 } },
+    { selector: 'node[?guarded]', style: { 'border-style': 'dashed', 'border-color': css('--edge') } },
+    { selector: 'node[kind="agent"].edited', style: { 'background-color': css('--chip') } },
+    { selector: 'node:selected', style: { 'border-color': css('--accent'), 'border-width': 3, 'border-style': 'solid' } },
+    { selector: 'node[kind="decision"], node[kind="loop"]', style: {
+      'shape': 'diamond', 'width': 196, 'height': 88, 'label': 'data(label)', 'text-wrap': 'wrap', 'text-max-width': 118,
+      'font-family': mono, 'font-size': 10, 'text-valign': 'center', 'text-halign': 'center', 'min-zoomed-font-size': 7,
+      'background-color': css('--lane'), 'border-width': 1, 'border-color': css('--edge'), 'color': css('--ink') } },
+    { selector: 'node[kind="loop"]', style: { 'shape': 'round-hexagon', 'height': 66, 'border-color': css('--run'), 'label': (e) => '↻ ' + e.data('label') } },
+    { selector: 'node[kind="start"], node[kind="end"]', style: {
+      'shape': 'ellipse', 'width': 62, 'height': 30, 'label': 'data(label)', 'font-size': 10, 'font-weight': 600,
+      'text-valign': 'center', 'text-halign': 'center', 'background-color': css('--ink'), 'color': css('--bg'), 'border-width': 0 } },
+    { selector: 'edge', style: {
+      'width': 1.6, 'line-color': css('--edge'), 'target-arrow-color': css('--edge'),
+      'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': .9,
+      'label': 'data(label)', 'font-family': mono, 'font-size': 10, 'color': css('--ink-2'),
+      'text-background-color': css('--panel'), 'text-background-opacity': labelled, 'text-background-padding': 3,
+      'text-background-shape': 'round-rectangle', 'text-border-color': css('--line'), 'text-border-width': 1, 'text-border-opacity': labelled,
+      'min-zoomed-font-size': 7 } },
+    { selector: 'edge[kind="back"]', style: { 'line-color': css('--run'), 'target-arrow-color': css('--run'), 'line-style': 'dashed', 'line-dash-pattern': [6, 5] } },
+    { selector: 'edge[kind="error"]', style: { 'line-color': css('--err'), 'target-arrow-color': css('--err'), 'line-style': 'dashed', 'line-dash-pattern': [6, 5] } },
+    { selector: 'edge[kind="data"]', style: { 'line-style': 'dashed', 'line-dash-pattern': [2, 4], 'line-opacity': .55, 'width': 1.2, 'target-arrow-shape': 'none', 'font-size': 9 } },
+    { selector: '.at-risk', style: { 'opacity': .35 } },
+    // Post-run overlay: state on the border, never on the accent. A skipped node fades; a
+    // conditional edge that fired turns solid, one that did not fades with its target.
+    { selector: 'node.run-done', style: { 'border-color': css('--ok'), 'border-width': 2, 'border-style': 'solid' } },
+    { selector: 'node.run-running', style: { 'border-color': css('--run'), 'border-width': 2 } },
+    { selector: 'node.run-failed', style: { 'border-color': css('--err'), 'border-width': 2 } },
+    { selector: 'node.run-skipped', style: { 'opacity': .4 } },
+    { selector: 'edge.run-fired', style: { 'line-style': 'solid' } },
+    { selector: 'edge.run-skipped', style: { 'opacity': .3 } },
+  ];
+}
+
+// ---------------------------------------------------------------- post-run overlay
+// The run record is what Claude Code wrote when the workflow finished; this only paints it. The
+// same page, the same positions — the honest metric is "approved ≥N, ran M".
+let RUN = null, RUN_ON = false, LIVE = false, DECIDED = false, POLL = null, T0 = 0;
+const RUN_OF = {};   // node id → agents from the record
+function matchRun(run) {
+  for (const n of GRAPH.nodes) RUN_OF[n.id] = [];
+  const prefix = (n) => (n.labelDynamic ? n.label.replace(/^`|`$/g, '').split('${')[0] : null);
+  for (const a of run.agents) {
+    const hit = GRAPH.nodes.find((n) => a.label === n.label)
+      || GRAPH.nodes.find((n) => n.fanOut?.labels?.includes(a.label))
+      || GRAPH.nodes.find((n) => prefix(n) && a.label.startsWith(prefix(n)) && (!n.phase || n.phase === a.phase));
+    if (hit) RUN_OF[hit.id].push(a);
+  }
+}
+const runState = (n) => {
+  const as = RUN_OF[n.id] || [];
+  if (!as.length) return 'skipped';
+  if (as.some((a) => /fail|error/.test(a.state))) return 'failed';
+  if (as.some((a) => !/done|complete|skipped/.test(a.state))) return 'running';
+  return 'done';
+};
+function paintRun(on) {
+  RUN_ON = on;
+  cy.elements().removeClass('run-done run-running run-failed run-skipped run-fired');
+  $('showrun').textContent = on ? 'Hide run' : 'Show last run';
+  if (!on) { $('hdr').textContent = HDR; syncNodeLabels(); renderPanel(cy.$('node:selected').first()); return; }
+  for (const n of GRAPH.nodes) {
+    const st = runState(n);
+    cy.$id(n.id).addClass('run-' + st);
+    if (st === 'skipped') cy.$id(n.id).connectedEdges().addClass('run-skipped');
+    else cy.$id(n.id).incomers('edge[kind="flow"]').addClass('run-fired');
+  }
+  const launched = RUN.agentCount ?? RUN.agents.length;
+  const fmt = (t) => (t >= 1e6 ? (t / 1e6).toFixed(2) + ' M' : t >= 1e3 ? Math.round(t / 1e3) + ' k' : String(t));
+  $('hdr').textContent = `ran ${launched} agent${launched === 1 ? '' : 's'} · approved ≥ ${GRAPH.minAgents}`
+    + (launched > GRAPH.minAgents ? ` (${launched - GRAPH.minAgents} more than the lower bound)` : launched < GRAPH.minAgents ? ' ⚠ FEWER than the lower bound — the count was wrong' : ' — exact')
+    + (RUN.totalTokens ? ` · ${fmt(RUN.totalTokens)} tokens` : '') + (RUN.durationMs ? ` · ${Math.round(RUN.durationMs / 60000)} min` : '')
+    + ` · ${RUN.status} · ${new Date(RUN.timestamp).toLocaleString()}`;
+  syncNodeLabels();
+  renderPanel(cy.$('node:selected').first());
+}
+function runSection(n) {
+  if (!RUN_ON) return '';
+  const as = RUN_OF[n.id] || [];
+  const fmt = (t) => (t >= 1e6 ? (t / 1e6).toFixed(2) + ' M' : t >= 1e3 ? Math.round(t / 1e3) + ' k' : String(t ?? '?'));
+  if (!as.length) return `<section><h2>Run</h2><p class="sentence">${LIVE ? 'Not started yet.' : `No agent from this call site appears in the run — ${n.guard ? 'its condition was false.' : 'it never launched.'}`}</p></section>`;
+  return `<section><h2>Run <span class="dim">${as.length} agent${as.length === 1 ? '' : 's'}</span></h2><div class="ctx">${as.map((a) =>
+    `<div><span class="chip">${escapeHtml(a.state)}</span><span>${escapeHtml(a.label)}${a.model ? ' · ' + escapeHtml(a.model) : ''}<small>${a.tokens == null ? '' : fmt(a.tokens) + ' tokens · '}${a.toolCalls ?? '?'} tool calls${a.durationMs ? ' · ' + Math.round(a.durationMs / 1000) + ' s' : ''}${a.lastTool ? ' · ' + escapeHtml(a.lastTool) : ''}${a.cost ? ' · $' + a.cost.toFixed(2) : ''}${a.byOrder ? ' · matched by call-site order, not by prompt' : ''}</small>${a.resultPreview ? `<small>${escapeHtml(a.resultPreview.slice(0, 200))}</small>` : ''}</span></div>`).join('')}</div></section>`;
+}
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function nodeLabel(n) {
+  // The face: phase · name ×N / purpose / model · effort. Everything else is side panel.
+  const mult = n.fanOut ? (n.fanOut.n !== null ? `  ×${n.fanOut.n}` : '  ×?') : '';
+  const tier = `${currentModel(n)} · ${currentEffort(n) || 'effort inherited'}` + (n.isolation === 'worktree' ? ' · worktree' : '') + (n.schemaKeys ? ' · schema' : '') + (n.agentType ? ' · @' + n.agentType : '');
+  // A computed label reads better as `survey:⟨slug⟩` than as its raw template source.
+  const name = n.labelDynamic ? n.label.replace(/^`|`$/g, '').replace(/\$\{([^}]*)\}/g, '⟨$1⟩') : n.label;
+  const head = (n.phase ? n.phase.toUpperCase() + ' · ' : '') + name + mult;
+  if (RUN_ON) {
+    const as = RUN_OF[n.id] || [], done = as.filter((a) => /done|complete/.test(a.state)).length;
+    // Live, the denominator is what the script declared, not how many have started so far —
+    // 2/6 is the useful number, 2/2 is a lie that resolves itself.
+    const total = LIVE && n.fanOut && n.fanOut.n ? Math.max(n.fanOut.n, as.length) : as.length;
+    const line = !as.length ? (LIVE ? 'waiting…' : n.guard ? 'skipped — condition false' : 'did not run')
+      : n.fanOut ? `${done}/${total} done` : as[0].state;
+    return `${head}\n${line}\n${tier}`;
+  }
+  return `${head}\n${purposeOf(n)}\n${tier}`;
+}
+function syncNodeLabels() {
+  for (const n of GRAPH.nodes) {
+    const el = cy.$id(n.id);
+    el.data('label', nodeLabel(n));
+    el.toggleClass('edited', !!edits[n.id]);
+  }
+}
+
+function select(el) {
+  renderPanel(el);
+  refreshButtons();
+}
+
+function renderPanel(el) {
+  const panel = $('panel');
+  const n = el && el.length ? GRAPH.nodes.find((x) => x.id === el.id()) : null;
+  if (!n && el && el.length && /^(decision|loop)$/.test(el.data('kind'))) {
+    const isLoop = el.data('kind') === 'loop';
+    panel.innerHTML = `<section><h2>${isLoop ? 'Loop' : 'Decision'} <span class="mono">${escapeHtml(SCRIPT_NAME)}:${el.data('line')}</span></h2>
+      <p class="sentence"><code>${escapeHtml(el.data('label'))}</code></p>
+      <p class="note">${isLoop ? 'The body runs once per pass; the dashed amber edge is the way back. How many passes is decided at runtime.' : 'Plain JavaScript, evaluated at runtime. Which branch fires is not knowable before the run — both are drawn, "yes" and "no".'}</p></section>`;
+    return;
+  }
+  if (!n) { panel.innerHTML = '<p class="empty">Select an agent to read and edit its mission.</p>'; return; }
+  const dyn = n.missionSpan === null;
+  const byId = (id) => GRAPH.nodes.find((x) => x.id === id);
+  // A select only where the value can be spliced back; otherwise the truth, in words.
+  const choice = (id, cur, known) => `<select id="${id}">${[...new Set([...known, cur])].map((v) =>
+    `<option value="${escapeHtml(v)}"${v === cur ? ' selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`;
+  const modelRow = n.modelSpan ? choice('model', currentModel(n), ['fable', 'opus', 'sonnet', 'haiku'])
+    : n.model === 'computed' ? `<code>${escapeHtml(n.modelText)}</code> <span class="dim">— decided at runtime</span>`
+    : `<span class="dim">inherited — the session's model</span>`;
+  // Jev's routing suggestion, next to the value it applies to. Only actionable where the literal
+  // can be spliced back; an inherited model gets the words, not a button.
+  const tip = ADVICE?.agents?.[n.id];
+  const tierRow = tip && tip.tier !== currentModel(n)
+    ? ` <span class="dim">· Jev: <b>${escapeHtml(tip.tier)}</b> — ${escapeHtml(tip.level.toLowerCase())} (${Math.round(tip.confidence * 100)}%)${n.modelSpan ? ` <button id="applytier" type="button">apply</button>` : ' — add <code>model:</code> to the call to change it'}</span>`
+    : tip ? ` <span class="dim">· Jev agrees (${Math.round(tip.confidence * 100)}%)</span>` : '';
+  const effortRow = n.effortSpan ? choice('effort', currentEffort(n), ['low', 'medium', 'high', 'xhigh', 'max'])
+    : n.effort === 'computed' ? `<span class="dim">decided at runtime</span>` : `<span class="dim">inherited — the session's effort</span>`;
+  // The assembled prompt with every ⟨expr⟩ as a chip; an upstream chip selects its producer.
+  let ci = -1;
+  const prompt = escapeHtml(assembledNow(n)).replace(/⟨([^⟩]*)⟩/g, (m, inner) => {
+    ci++; const c = n.context?.[ci];
+    const up = c?.kind === 'upstream' && c.producers[0];
+    return `<span class="chip${up ? ' go' : ''}"${up ? ` data-go="${up}" title="from ${escapeHtml(byId(up)?.label || up)} — click to open"` : ''}>⟨${inner}⟩</span>`;
+  });
+  const ctxRows = (n.context || []).map((c) => {
+    if (c.kind === 'upstream') return `<div><span class="chip go" data-go="${c.producers[0]}">⟨${escapeHtml(c.expr)}⟩</span><span>← ${c.producers.map((p) => escapeHtml(byId(p)?.label || p)).join(', ')}${byId(c.producers[0])?.fanOut ? ` (${byId(c.producers[0]).fanOut.n ?? 'N'} results)` : ''}${byId(c.producers[0])?.schemaKeys ? ' · structured' : ' · free text'}${c.mayContainNull ? ' · <b>may contain null</b> — no .filter(Boolean)' : ''}</span></div>`;
+    if (c.kind === 'const') return `<div><span class="chip">⟨${escapeHtml(c.expr)}⟩</span><span>constant, ${c.chars} chars<small>${escapeHtml(c.preview)}…</small></span></div>`;
+    if (c.kind === 'per-item') return `<div><span class="chip">⟨${escapeHtml(c.expr)}⟩</span><span class="dim">one value per fan-out item</span></div>`;
+    return `<div><span class="chip">⟨${escapeHtml(c.expr)}⟩</span><span class="dim">runtime — not knowable before the run</span></div>`;
+  }).join('');
+  const fan = n.fanOut ? (n.fanOut.n !== null ? `×${n.fanOut.n} over <code>${escapeHtml(n.fanOut.over || 'inline array')}</code>` : `×? — sized at runtime by <code>${escapeHtml(n.fanOut.over)}</code>`) : null;
+  const goals = n.fanOut?.prompts ? [...new Set(n.fanOut.prompts.map((p) => firstSentence(p)))] : null;
+
+  panel.innerHTML = `
+    <section>
+      <h2>${escapeHtml(n.labelDynamic ? n.label.replace(/^`|`$/g, '').replace(/\$\{([^}]*)\}/g, '⟨$1⟩') : n.label)} <span class="mono">${escapeHtml(SCRIPT_NAME)}:${n.line}</span></h2>
+      <dl class="rows">
+        <dt>model</dt><dd>${modelRow}${tierRow}</dd>
+        <dt>effort</dt><dd>${effortRow}</dd>
+        <dt>phase</dt><dd>${escapeHtml(n.phase || '(none)')}</dd>
+        ${fan ? `<dt>fan-out</dt><dd>${fan}${n.fanOut.labels ? `<small>${n.fanOut.labels.map(escapeHtml).join(' · ')}</small>` : ''}</dd>` : ''}
+        ${n.guard ? `<dt>runs only if</dt><dd><code>${escapeHtml(n.guard.text)}</code>${n.guard.else ? ' <span class="dim">(else branch)</span>' : ''}${n.guard.kind === 'loop' ? ' <span class="dim">— loop body, count unbounded</span>' : ''} <span class="dim">line ${n.guard.line}</span></dd>` : ''}
+      </dl>
+    </section>
+    <section>
+      <h2>Mission <span class="dim">${assembledNow(n).length} chars${goals && goals.length > 1 ? ` · ${goals.length} different goals across items` : ''}</span></h2>
+      <pre class="assembled" id="assembled">${prompt || '(none)'}</pre>
+      ${dyn
+        ? `<p class="note">${n.fanOut?.prompts ? 'One prompt per item, shown for the first item. Edit them in the script.' : 'This prompt is computed at runtime, not a literal. Visualised, not editable — editing it would mean rewriting imperative code, which this gate deliberately does not do.'}</p>`
+        : `<label for="mission">Editable tail${n.missionKind === 'template-tail' ? ' — the text after the last ⟨chip⟩; everything before it is shared' : ''}</label><textarea id="mission">${escapeHtml(currentMission(n))}</textarea>`}
+      ${n.fanOut && !n.fanOut.prompts ? `<p class="note">One node, ${n.fanOut.n ?? 'N'} agents: editing this mission changes it for <em>every</em> agent the fan-out launches.</p>` : ''}
+    </section>
+    ${runSection(n)}
+    ${ctxRows ? `<section><h2>Context <span class="dim">${n.context.length}</span></h2><div class="ctx">${ctxRows}</div></section>` : ''}
+    <section>
+      <h2>Execution</h2>
+      <dl class="rows">
+        <dt>isolation</dt><dd>${n.isolation === 'worktree' ? '<b>worktree</b> — this agent is expected to mutate files' : n.isolation === 'computed' ? '<span class="dim">decided at runtime</span>' : '<span class="dim">none — works in the shared checkout</span>'}</dd>
+        <dt>schema</dt><dd>${n.schemaKeys ? `structured output: <code>${n.schemaKeys.map(escapeHtml).join(', ')}</code>` : '<span class="dim">none — free-text result</span>'}</dd>
+        <dt>agentType</dt><dd>${n.agentType ? `<code>${escapeHtml(n.agentType)}</code>` : '<span class="dim">none — the default workflow subagent</span>'}</dd>
+        ${n.writesTo?.length ? `<dt>writes to</dt><dd><code>${n.writesTo.map(escapeHtml).join('</code><br><code>')}</code> <span class="dim">— from the prompt text</span></dd>` : ''}
+      </dl>
+      <p class="sentence">${n.agentType
+        ? `Tools come from the <code>${escapeHtml(n.agentType)}</code> agent definition; this page does not read it, so treat its tool list as unknown.`
+        : `Without <code>agentType</code> this agent can reach <b>every MCP tool connected to the session, writes included</b> — discovered at runtime via ToolSearch. Nothing in this script narrows that.`}</p>
+    </section>
+  `;
+  for (const chip of panel.querySelectorAll('.chip.go')) chip.onclick = () => { const t = cy.$id(chip.dataset.go); cy.$(':selected').unselect(); t.select(); select(t); cy.animate({ center: { eles: t }, duration: 200 }); };
+  const model = $('model');
+  if (model) model.onchange = () => { pushHistory(); (edits[n.id] ||= {}).model = model.value; afterEdit(); };
+  const applyTier = $('applytier');
+  if (applyTier) applyTier.onclick = () => { pushHistory(); (edits[n.id] ||= {}).model = tip.tier; afterEdit(); };
+  const effort = $('effort');
+  if (effort) effort.onchange = () => { pushHistory(); (edits[n.id] ||= {}).effort = effort.value; afterEdit(); };
+  const mission = $('mission');
+  if (mission) {
+    let before = null;
+    mission.onfocus = () => { before = mission.value; };
+    mission.onchange = () => {
+      if (mission.value === before) return;
+      pushHistory();
+      (edits[n.id] ||= {}).mission = mission.value;
+      afterEdit();
+    };
+  }
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------------------------------------------------------------- validate + gate
+function problems() {
+  const out = [];
+  if (!GRAPH.nodes.length) out.push({ msg: 'No agent() call found — nothing to approve.', id: null });
+  for (const n of GRAPH.nodes) {
+    // Check the ASSEMBLED prompt, not the editable tail. A prompt ending in ${x} has an empty tail
+    // by construction, and flagging that blocked Approve forever on a perfectly valid script —
+    // the only way past was to corrupt a correct prompt to satisfy a false error.
+    const whole = n.missionSpan && edits[n.id]?.mission !== undefined
+      ? n.assembled.slice(0, n.assembled.length - n.mission.length) + edits[n.id].mission
+      : n.assembled;
+    if (!whole.trim()) out.push({ msg: `${n.label}: prompt is empty.`, id: n.id });
+  }
+  // The edit must still be valid JavaScript. Approving a SyntaxError would write a broken script
+  // over the user's file AND record it as approved.
+  try {
+    acorn.parse(applyEdits(SRC, GRAPH.nodes, edits), {
+      ecmaVersion: 'latest', sourceType: 'module',
+      allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true, allowHashBang: true,
+    });
+  } catch (e) {
+    out.push({ msg: `Your edits do not parse as JavaScript (${e.message}). Approve is blocked.`, id: null });
+  }
+  return out;
+}
+
+function refreshButtons() {
+  if (DECIDED) return;   // approved: the footer and the status line belong to the run now
+  const errs = problems();
+  const ok = !errs.length;
+  $('approve').disabled = !ok;
+  $('undo').disabled = !history.length;
+  $('redo').disabled = !future.length;
+
+  const st = $('status');
+  st.className = 'status' + (ok ? '' : ' blocked');
+  if (errs.length) st.textContent = errs[0].msg;
+  else st.textContent = Object.keys(edits).length ? `${Object.keys(edits).length} agent(s) edited` : 'unchanged';
+}
+
+// ---------------------------------------------------------------- live run
+// The tab that approved the plan stays on the plan and watches it run: same graph, same positions,
+// same panel — only the source changes, from the final record to the transcripts as they are
+// written. /workflows in the terminal is still the terminal view; this is the other one.
+function goLive(approvalMsg) {
+  LIVE = true; DECIDED = true; T0 = Date.now();
+  document.body.classList.add('live');
+  $('approve').disabled = true;
+  $('cancel').disabled = true;      // the gate is decided; every POST answers 409 from here on
+  $('showrun').hidden = true;
+  $('status').className = 'status';
+  $('status').textContent = String(approvalMsg).split('\n')[0]
+    + ' — no Stop button here: only Claude Code can stop a workflow (/workflows in the terminal).';
+  $('hdr').textContent = 'Approved — waiting for the first agent…';
+  poll();
+  POLL = setInterval(poll, 3000);
+}
+
+async function poll() {
+  let live; try { live = await fetch(q('/live')).then((r) => r.json()); } catch { return; }
+  if (!live || !live.started) return;               // the run directory does not exist yet
+  if (live.finished) return finish();
+  RUN = { agentCount: live.agents.length, agents: live.agents.map(liveAgent), status: 'running', timestamp: T0,
+    cost: live.cost, unpriced: live.unpriced };
+  matchLive(RUN.agents);
+  paintRun(true);
+  $('hdr').textContent = liveHeader(RUN.agents);
+}
+
+// The run record has landed: labels, phases and real token counts exist now, so hand the graph back
+// to the post-run path that already knows how to read them.
+async function finish() {
+  clearInterval(POLL); POLL = null; LIVE = false;
+  const run = await fetch(q('/run')).then((r) => r.json()).catch(() => null);
+  if (run && run.agents && run.agents.length) { RUN = run; matchRun(run); }
+  paintRun(true);
+  $('showrun').hidden = false;
+  $('showrun').onclick = () => paintRun(!RUN_ON);
+  $('status').textContent = 'Run finished — this is the recorded run. You can close this tab.';
+}
+
+// /live ships raw facts. This is the same shape /run returns, so paintRun and runSection are reused
+// unchanged; tokens stay null because nothing knows them until the record is written.
+const liveAgent = (a) => ({
+  label: 'agent ' + String(a.agentId).slice(0, 8), phase: null, model: null,
+  state: a.failed ? 'failed' : a.done ? 'done' : 'running',
+  tokens: null, toolCalls: a.toolCalls, lastTool: a.lastTool, byOrder: false, cost: a.cost ?? null,
+  startedAt: a.startedAt || null,
+  durationMs: a.startedAt && a.lastAt ? Date.parse(a.lastAt) - Date.parse(a.startedAt) : null,
+  resultPreview: String(a.resultPreview || ''), nodeId: a.nodeId || null, tied: a.tied || null,
+});
+
+// The needles each call site is recognised by. An edited mission tail is what the agent will
+// actually receive, so it is a needle too. Sent ONCE, with the approval: the server does the search,
+// because the prompts it searches run to 190 000 characters and shipping them back every three
+// seconds to match here would cost more than the run.
+function matchNeedles() {
+  const out = {};
+  for (const n of GRAPH.nodes) {
+    const ed = edits[n.id]?.mission;
+    out[n.id] = (ed === undefined ? n.matchChunks : [...n.matchChunks, cook(ed).trim()])
+      .filter((x) => x.length >= 24);
+  }
+  return out;
+}
+
+// /live names the call site whenever the prompt names it unambiguously. What is left is the honest
+// handling of the rest: a prompt built entirely at runtime (no literal to match) or one whose literal
+// is shared by two call sites (`tied`). Those go by arrival order — among the tied sites when there
+// are any — into the first with room left, and are flagged so the panel says how they got there.
+function matchLive(agents) {
+  for (const n of GRAPH.nodes) RUN_OF[n.id] = [];
+  const spare = [];
+  for (const a of agents) {
+    if (a.nodeId && RUN_OF[a.nodeId]) RUN_OF[a.nodeId].push(a); else spare.push(a);
+  }
+  for (const a of spare) {
+    const pool = a.tied?.length ? GRAPH.nodes.filter((x) => a.tied.includes(x.id)) : GRAPH.nodes;
+    const n = pool.find((x) => RUN_OF[x.id].length < (x.fanOut ? (x.fanOut.n || 99) : 1)) || pool[0];
+    if (!n) continue;                               // no room anywhere for THIS one; the rest may fit
+    a.byOrder = true;
+    RUN_OF[n.id].push(a);
+  }
+}
+
+function liveHeader(agents) {
+  const done = agents.filter((a) => /done|fail/.test(a.state)).length;
+  // A tab reloaded twenty minutes into a run has no idea when it started — the transcripts do.
+  const t0 = Math.min(T0, ...agents.map((a) => Date.parse(a.startedAt) || Infinity));
+  const s = Math.round((Date.now() - t0) / 1000);
+  // The number that can still change your mind. Not a forecast — what has been spent so far.
+  const money = RUN?.cost ? ` · $${RUN.cost < 100 ? RUN.cost.toFixed(2) : Math.round(RUN.cost)} so far${RUN.unpriced ? '+' : ''}` : '';
+  return `running · ${done}/${agents.length} agent${agents.length === 1 ? '' : 's'} finished` + money
+    + ` · approved ≥ ${GRAPH.minAgents}`
+    + (agents.length > GRAPH.minAgents ? ` (${agents.length - GRAPH.minAgents} over the lower bound so far)` : '')
+    + ` · ${s < 90 ? s + ' s' : Math.round(s / 60) + ' min'} elapsed · dimmed = not started`;
+}
+
+// ---------------------------------------------------------------- advice (Jev)
+// Sends the skeleton this page extracted — name, phases, one mission per agent, never the whole
+// file — to the server, which asks Jev. Silent when the server has no key or Jev does not answer.
+async function askAdvice() {
+  const skel = {
+    name: SRC.match(/name:\s*['"]([^'"]+)['"]/)?.[1] || null,
+    description: SRC.match(/description:\s*['"]([^'"]+)['"]/)?.[1] || null,
+    phases: GRAPH.phases,
+    agents: GRAPH.nodes.filter((n) => n.kind === 'agent').map((n) => ({ id: n.id, label: n.label, phase: n.phase, model: n.model, mission: assembledNow(n) })),
+  };
+  if (!skel.agents.length) return;
+  let a = null;
+  try { a = await fetch(q('/advice'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(skel) }).then((r) => r.json()); } catch { return; }
+  if (!a || !a.available) return;
+  ADVICE = a;
+  const n = Object.keys(a.agents).length;
+  const differ = skel.agents.filter((s) => a.agents[s.id] && a.agents[s.id].tier !== s.model).length;
+  $('jev').textContent = 'Jev: ' + [
+    a.kind ? a.kind.choice : null,
+    a.stakes ? 'stakes ' + a.stakes.text : null,
+    n ? `tiers for ${n} agent${n === 1 ? '' : 's'}${differ ? ` (${differ} differ — select an agent to apply)` : ' (all as written)'}` : null,
+  ].filter(Boolean).join(' · ') + ' — agent missions were sent to api.typesafe.ai';
+  $('jev').hidden = false;
+  // Not while the human is typing in the panel: innerHTML replacement would drop the edit without a
+  // change event. The next selection shows the advice.
+  // ponytail: asked once, from the missions as written — a rewritten mission keeps its original tip.
+  // Re-ask on mission edit if that starts mattering.
+  if (!LIVE && !$('panel').contains(document.activeElement)) renderPanel(cy.$('node:selected').first());
+}
+
+// ---------------------------------------------------------------- boot
+(async function () {
+  SRC = await fetch(q('/script')).then((r) => r.text());
+  try {
+    GRAPH = extract(SRC);
+  } catch (e) {
+    document.body.innerHTML = `<pre style="padding:24px">Could not parse this script:\n\n${escapeHtml(e.message)}\n\nThe gate is still active. Approve it the usual way, from the terminal.</pre>`;
+    return;
+  }
+  // The number being approved. `≥` is honest: guarded sites count 0, runtime fan-outs count 1.
+  const fan = GRAPH.nodes.filter((n) => n.fanOut && n.fanOut.n === null).length;
+  const guarded = GRAPH.nodes.filter((n) => n.guard).length;
+  HDR =
+    `≥ ${GRAPH.minAgents} agent${GRAPH.minAgents === 1 ? '' : 's'} will run · ${GRAPH.nodes.length} call site${GRAPH.nodes.length === 1 ? '' : 's'}`
+    + (fan ? ` · ${fan} fan out over a runtime list` : '')
+    + (guarded ? ` · ${guarded} conditional` : '')
+    + (GRAPH.flags.loop ? ' · loop: count unbounded' : '')
+    + (GRAPH.flags.budget ? ' · scales with the token budget' : '')
+    + (GRAPH.phases.length ? ` · ${GRAPH.phases.join(' → ')}` : '');
+  $('hdr').textContent = HDR;
+  // Reloaded while the run this tab approved is still going: come back as the live view. Without
+  // this the page returns as an editor whose Approve button re-enables, 409s, and then reports
+  // "the gate is still active" — which is false, and the run goes unwatched.
+  fetch(q('/live')).then((r) => r.json()).then((live) => { if (live && live.running) goLive('watching the run this tab approved'); }).catch(() => {});
+  // A previous run of this exact script? Then the graph can also show what actually happened.
+  fetch(q('/run')).then((r) => r.json()).then((run) => {
+    if (LIVE || POLL) return;      // a run is being watched right now; the last one is not the story
+    if (!run || !run.agents?.length) return;
+    RUN = run; matchRun(run);
+    $('showrun').hidden = false;
+    $('showrun').onclick = () => paintRun(!RUN_ON);
+  }).catch(() => {});
+  // A throw in build() used to leave a rendered-looking graph that ignored every click and an
+  // Approve button that could never enable — a dead UI that looks alive. Fail loudly instead.
+  try {
+    build();
+    refreshButtons();
+  } catch (e) {
+    $('status').className = 'status blocked';
+    $('status').textContent = 'Editor failed to start: ' + e.message + ' — approve from the terminal instead.';
+    $('approve').disabled = true;
+    throw e;
+  }
+
+  if (HISTORY_URL) { $('history').href = HISTORY_URL; $('history').hidden = false; }
+  askAdvice();
+  // Tell the hook a human is here. `open` launches this tab whether or not anyone is at the desk,
+  // so the page loading proves nothing; a pointer or a key does. Sent once.
+  let seenSent = false;
+  const seenOnce = () => { if (seenSent) return; seenSent = true; fetch(q('/seen'), { method: 'POST' }).catch(() => {}); };
+  for (const ev of ['pointermove', 'pointerdown', 'keydown']) document.addEventListener(ev, seenOnce);
+  $('undo').onclick = undo;
+  $('redo').onclick = redo;
+  document.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    if (e.key === 'y' || (e.key === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+  });
+
+  $('approve').onclick = async () => {
+    $('approve').disabled = true;
+    const script = applyEdits(SRC, GRAPH.nodes, edits);
+    const n = Object.keys(edits).length;
+    const summary = `${GRAPH.nodes.length} agent site(s)${fan ? ' incl. runtime fan-out' : ''}`
+      + (GRAPH.phases.length ? `, phases ${GRAPH.phases.join('→')}` : '')
+      + `, ${n ? n + ' edited in graph editor' : 'unedited'}`;
+    const res = await fetch(q('/approve'), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ script, summary, match: matchNeedles() }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      document.body.innerHTML = `<pre style="padding:24px">${escapeHtml('Approval failed, the gate is still active:\n' + text)}</pre>`;
+      return;
+    }
+    goLive(text);
+  };
+
+  $('cancel').onclick = async () => {
+    await fetch(q('/cancel'), { method: 'POST' }).catch(() => {});
+    document.body.innerHTML = '<pre style="padding:24px">Cancelled. The gate is still active and nothing was changed.\nYou can close this tab.</pre>';
+  };
+})();
+</script>

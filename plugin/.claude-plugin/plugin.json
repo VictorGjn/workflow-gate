@@ -1,6 +1,6 @@
 {
   "name": "workflow-gate",
-  "version": "1.3.0",
+  "version": "1.7.0",
   "description": "Requires a human-approved plan before Claude Code's Workflow tool runs, plus the workflow-orchestration-patterns skill for designing that plan.",
   "author": {
     "name": "VictorGjn"
