@@ -1,19 +1,25 @@
-// Intent and model routing for the graph editor, on Jev (TypeSafe System One).
+// Intent, model and tool routing for the graph editor, on Jev (TypeSafe System One).
 //
 // The cheap decision layer in front of the expensive one: Jev reads the script's SKELETON (name,
 // phases, one mission per agent) and answers typed questions — what kind of work the workflow is,
-// how much a wrong result costs, and what each agent needs from its model. The tier policy (score
-// band → haiku / sonnet / opus) lives HERE in code, not in the model: Jev never sees a model name.
+// how much a wrong result costs, what each agent needs from its model, and which agent type (so which
+// tools) should run it. The tier policy (score band → haiku / sonnet / opus) lives HERE in code, not
+// in the model: Jev never sees a model name. It does see agent-type names: they ARE the choice, read
+// from the local agent definitions, and its pick is only kept if it is one of them.
 //
 // Advice only. It never allows or denies — the gate's promise is "a human approved this exact
 // script", and a classifier must not quietly become that human. A tier answer under its floor is
 // flagged as low confidence, never shown as a tier. Without TYPESAFE_API_KEY the feature is simply absent.
 //
-// ponytail: raw fetch, no SDK — the plugin ships from a cache dir with zero dependencies.
+// ponytail: raw fetch, no SDK — the plugin ships from a cache dir with zero dependencies. JevRouter
+// (BillionsBobby/JevRouter) was weighed for the tool routing: same systemone Choice, plus an npm
+// dependency this process cannot take and a fallback policy that picks for the human.
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync, openSync, readSync, closeSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 // The same policy as the skill's "Cost management: picking a model tier" (skills/workflow-orchestration-
 // patterns/SKILL.md) — change both or they drift.
@@ -43,14 +49,100 @@ const CACHE_TTL_MS = 30 * 60 * 1000;
 export const MAX_AGENTS = 40;
 const MISSION_CHARS = 1500;
 const FX = '_fx';
+const TYPE = '_type';
 
 // Agent ids share the questions map with `kind` and `stakes` and the advice map's prototype. Only
 // the editor's own `aN` ids get through — anything else is not from the page.
 const ID = /^a\d+$/;
 const agentsOf = (skel) => (skel.agents || []).filter((a) => ID.test(String(a?.id))).slice(0, MAX_AGENTS);
 
+// ---------------------------------------------------------------------------- agent types (tools)
+// `agent()` has no `tools` option: `agentType` is its only tool boundary, so routing tools means
+// routing agent types. The catalog is what Claude Code's registry lists, minus ~/.claude/agents (personal
+// definitions drift; the package ships the ones a workflow should reach for): (none), then
+// <project>/.claude/agents (shadowing a same-named built-in), the built-ins, then this plugin's agents/
+// and every enabled plugin's, as <plugin>:<name>.
+// First name wins. Names are VERBATIM frontmatter (`(@_@) engineer` is a real registry name); one that
+// cannot sit inside a quoted literal is skipped, since it could never be spliced. The same check is
+// in the editor's applyEdits — change both.
+// The (none) rule is the skill's "custom agentType only for specialized lenses" — change both.
+export const NO_TYPE = '(none)';
+const BUILTIN_TYPES = [
+  { name: NO_TYPE, description: 'No specialized agent type: the default workflow subagent. The norm for ordinary build, research and review work, except a mission that invokes a skill: it is not documented to have the Skill tool.', tools: 'every tool connected to the session' },
+  { name: 'general-purpose', description: 'Multi-step tasks that must invoke a Skill or a specific MCP tool.', tools: 'all tools' },
+  { name: 'Explore', description: 'Read-only search across many files: locates code and reports conclusions, does not edit.', tools: 'all except Agent, Edit, Write, NotebookEdit' },
+  { name: 'Plan', description: 'Software architect: designs an implementation plan, returns steps and critical files, does not edit.', tools: 'all except Agent, Edit, Write, NotebookEdit' },
+].map((t) => ({ ...t, skills: [], source: 'built-in' }));
+// ponytail: one single-stage Choice (JevRouter's default ceiling too). Past 32, ask coarse-then-final
+// in two calls.
+export const MAX_TYPES = 32;
+const DESC_CHARS = 200;
+const spliceable = (s) => typeof s === 'string' && s.length > 0 && s.length <= 100 && !/['"`\\\r\n\u2028\u2029]|\$\{/.test(s);
+const unquote = (s) => s.trim().replace(/^(['"])(.*)\1$/, '$2');
+
+// The keys this needs from a definition's frontmatter: one-line values, a folded/literal block, or
+// a `- item` list (joined with ", "). ponytail: not YAML — anything else reads as missing.
+function frontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const out = {};
+  let key = null;
+  for (const line of m ? m[1].split(/\r?\n/) : []) {
+    const kv = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
+    if (kv) { key = kv[1]; out[key] = /^[>|][-+]?$/.test(kv[2]) ? '' : kv[2]; continue; }
+    const item = line.match(/^\s+-\s+(.*)$/);
+    if (key && item) out[key] += (out[key] ? ', ' : '') + unquote(item[1]);
+    else if (key && /^\s+\S/.test(line)) out[key] += (out[key] ? ' ' : '') + line.trim();
+  }
+  return out;
+}
+
+// Top-level agents/*.md only: a subfolder adds its own segment to the registry name.
+function typesIn(dir, source, plugin = null) {
+  let files = [];
+  try { files = readdirSync(dir).filter((f) => f.endsWith('.md')).sort(); } catch { return []; }
+  return files.flatMap((f) => {
+    let fm; try { fm = frontmatter(readFileSync(join(dir, f), 'utf8')); } catch { return []; }
+    const name = (plugin ? plugin + ':' : '') + unquote(fm.name || ''), description = unquote(fm.description || '');
+    if (!spliceable(name) || !fm.name || !description) return [];
+    const list = (v) => unquote(v || '').replace(/^\[(.*)\]$/, '$1').split(/,\s*/).map(unquote).filter(Boolean);
+    // The tools the agent really gets: disallowedTools comes out of an explicit list, or qualifies
+    // "all tools" — what Jev reads and what the editor's Skill check tests.
+    const allowed = list(fm.tools), denied = list(fm.disallowedTools);
+    const tools = allowed.length ? allowed.filter((t) => !denied.includes(t)).join(', ')
+      : 'all tools' + (denied.length ? ' except ' + denied.join(', ') : '');
+    return [{ name, description: description.slice(0, DESC_CHARS), tools, skills: list(fm.skills), source }];
+  });
+}
+
+// This plugin's agents first (the running copy, which may be newer than the installed one), then
+// every plugin the user settings enable. ponytail: user-scope enablement only — a plugin enabled
+// only in a project's settings is not read.
+const OWN_AGENTS = { plugin: 'workflow-gate', dir: join(dirname(fileURLToPath(import.meta.url)), '..', 'agents') };
+function pluginAgentDirs() {
+  try {
+    const installed = JSON.parse(readFileSync(join(homedir(), '.claude', 'plugins', 'installed_plugins.json'), 'utf8')).plugins || {};
+    const enabled = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8')).enabledPlugins || {};
+    return Object.entries(installed).filter(([k, v]) => enabled[k] === true && v?.[0]?.installPath)
+      .map(([k, v]) => ({ plugin: k.split('@')[0], dir: join(v[0].installPath, 'agents') }));
+  } catch { return []; }
+}
+
+// projectDir: the session's project root, or null. The project dir is writable by the agents this
+// gate constrains, so each entry carries its source and tools for the human to read next to the pick.
+export function agentTypes(projectDir, plugins = [OWN_AGENTS, ...pluginAgentDirs()]) {
+  const seen = new Set(), out = [];
+  const project = projectDir ? typesIn(join(projectDir, '.claude', 'agents'), 'project') : [];
+  // (none) first; then a project definition shadows a built-in of the same name, as Claude Code does.
+  for (const t of [BUILTIN_TYPES[0], ...project, ...BUILTIN_TYPES.slice(1), ...plugins.flatMap((p) => typesIn(p.dir, 'plugin', p.plugin))]) {
+    if (seen.has(t.name) || out.length >= MAX_TYPES) continue;
+    seen.add(t.name); out.push(t);
+  }
+  return out;
+}
+
 // The skeleton is what the editor already extracted (acorn, client-side) — no second parser here.
-export function requestFor(skel) {
+// types: the agentTypes() catalog; empty = no type question.
+export function requestFor(skel, types = []) {
   const agents = agentsOf(skel).map((a) => ({
     id: String(a.id), label: String(a.label || ''), phase: a.phase ? String(a.phase) : null,
     model: String(a.model || 'inherited'), mission: String(a.mission || '').slice(0, MISSION_CHARS),
@@ -64,6 +156,9 @@ export function requestFor(skel) {
     // Same request, one more yes/no per agent: what the reviewer should read first. `_fx` can never
     // match ID, so it cannot shadow another agent's question.
     questions[a.id + FX] = { type: 'noul', instructions: { question: `Does the mission of the agent with id ${a.id} push, publish, deploy, delete, or write outside its working directory?`, agent: a.id } };
+    // fromEntries defines own keys: a type named __proto__ is data, never the criteria's prototype.
+    if (types.length) questions[a.id + TYPE] = { type: 'choice', criteria: Object.fromEntries(types.map((t) => [t.name, `${t.description} Tools: ${t.tools}.`])),
+      instructions: { question: `Which agent type should run the agent with id ${a.id}? The type fixes which tools it can reach. ${NO_TYPE} is the norm; pick a named type only when the mission needs that type's specialized lens or its tools.`, agent: a.id } };
   }
   return {
     model: process.env.TYPESAFE_MODEL || 'jev-latest',
@@ -76,12 +171,16 @@ export function requestFor(skel) {
 // file anything local can write, so every field is checked here and tiers only ever come from TIER.
 // kind/stakes under MIN_CONFIDENCE are silence. A tier under its floor — HIGH_STAKES_CONFIDENCE for
 // a downgrade unless stakes are known to be low, MIN_CONFIDENCE otherwise — is flagged, not dropped.
-export function adviceFrom(answers, skel) {
+// A type pick is kept only if it names a catalog entry; (none) comes out as type: null. Under its floor
+// a pick is not a suggestion, but where Jev hesitated is information: the two likeliest catalog types,
+// with their probabilities, for the human to choose between — never a fallback chosen for them.
+export function adviceFrom(answers, skel, types = []) {
   const p01 = (x) => typeof x === 'number' && x >= 0 && x <= 1;
   const valid = (a) => a && p01(a.confidence) && Number.isFinite(a.score ?? 0);
   const sure = (a) => valid(a) && a.confidence >= MIN_CONFIDENCE;
   const band = (a) => Math.min(Math.max(Math.round(a.score), 0), LEVELS.length - 1);
-  const out = { kind: null, stakes: null, agents: {}, fx: {} };
+  const byName = new Map(types.map((t) => [t.name, t]));
+  const out = { kind: null, stakes: null, agents: {}, fx: {}, types: {} };
   answers = answers && typeof answers === 'object' ? answers : {};
   if (sure(answers.kind) && Object.hasOwn(KINDS, answers.kind.choice)) out.kind = { choice: answers.kind.choice, confidence: answers.kind.confidence };
   if (sure(answers.stakes) && Number.isFinite(answers.stakes.score)) out.stakes = { level: band(answers.stakes), text: STAKES[band(answers.stakes)], confidence: answers.stakes.confidence };
@@ -90,6 +189,13 @@ export function adviceFrom(answers, skel) {
     // A Noul is its own probability — no separate confidence. The editor thresholds it.
     const fx = answers[a.id + FX]?.noul;
     if (p01(fx)) out.fx[a.id] = fx;
+    const ty = answers[a.id + TYPE], t = valid(ty) && byName.get(ty.choice);
+    if (t) out.types[a.id] = ty.confidence >= MIN_CONFIDENCE
+      ? { type: t.name === NO_TYPE ? null : t.name, tools: t.tools, source: t.source, confidence: ty.confidence }
+      : { low: true, confidence: ty.confidence, floor: MIN_CONFIDENCE,
+          alts: Object.entries(ty.probabilities && typeof ty.probabilities === 'object' ? ty.probabilities : {})
+            .filter(([n, p]) => byName.has(n) && p01(p)).sort((x, y) => y[1] - x[1]).slice(0, 2)
+            .map(([n, p]) => ({ type: n === NO_TYPE ? null : n, p })) };
     const ans = answers[a.id];
     if (!valid(ans) || !Number.isFinite(ans.score)) continue;
     const b = band(ans);
@@ -122,11 +228,12 @@ function writeCache(dir, file, answers) {
   } catch { /* a cache that cannot be written is just a cache miss next time */ }
 }
 
-// null = feature absent (no key) or Jev unreachable; the editor shows nothing either way.
-export async function askJev(skel, cacheDir = null) {
+// null = feature absent (no key) or Jev unreachable; the editor shows nothing either way. The type
+// catalog is part of the body, so an edited agent definition is a new cache key.
+export async function askJev(skel, cacheDir = null, types = []) {
   const key = process.env.TYPESAFE_API_KEY;
   if (!key) return null;
-  const body = JSON.stringify(requestFor(skel));   // hashed and sent as the same string
+  const body = JSON.stringify(requestFor(skel, types));   // hashed and sent as the same string
   const file = cacheDir && cacheFile(cacheDir, body);
   let answers = file && readCache(file);
   if (!answers) {
@@ -134,7 +241,7 @@ export async function askJev(skel, cacheDir = null) {
     if (!answers) return null;
     if (file) writeCache(cacheDir, file, answers);
   }
-  return adviceFrom(answers, skel);
+  return adviceFrom(answers, skel, types);
 }
 
 // One call to Jev: its answers map, or null when it cannot be reached.

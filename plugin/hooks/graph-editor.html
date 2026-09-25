@@ -48,6 +48,8 @@
   aside section h2 .mono, aside section h2 .dim { letter-spacing: 0; text-transform: none; font-weight: 400; }
   .rows { display: grid; grid-template-columns: 82px 1fr; row-gap: 6px; column-gap: 10px; font-size: 12.5px; align-items: baseline; margin: 0; }
   .rows dt { color: var(--dim); } .rows dd { margin: 0; } .rows small, .ctx small { display: block; color: var(--dim); font-size: 11px; }
+  .rows small { margin-top: 3px; } .rows small.warn { color: var(--warn); }
+  .rows button { padding: 1px 8px; font-size: 11px; margin-left: 4px; }
   .dim { color: var(--dim); }
   .ctx { display: grid; gap: 6px; font-size: 12.5px; }
   .ctx div { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: baseline; }
@@ -107,7 +109,7 @@
   <span class="meta" id="waiting" hidden></span>
   <span class="meta" id="since" hidden></span>
   <a class="meta" id="eyes" hidden href="#" title="The call sites worth reading first — cost and side-effect lints. Click to step through them. They never block or allow Approve."></a>
-  <span class="meta dim" id="jev" hidden title="Intent and model routing by Jev (TypeSafe System One). Advice only — the decision is still yours."></span>
+  <span class="meta dim" id="jev" hidden title="Intent, model and agent-type routing by Jev (TypeSafe System One). Advice only — the decision is still yours."></span>
   <span class="grow"></span>
 </header>
 
@@ -293,16 +295,17 @@ function extract(src) {
       if (/Function/.test(stack[i + 1]?.type || '')) break;   // do not look past our own function
     }
 
-    // Where `model:` can be spliced in when the call has none: after the options' `{`, or as a new
-    // options argument. Never beside a spread, a computed or quoted-model key, or a variable: any of
-    // them could already set the model, and an insert would then change bytes but not behaviour.
-    // A spread argument hides which position the options land in: `agent(...args, { model })` may be a
-    // third argument the call ignores while this page reads it as the options.
-    const modelInsert = !isAgent || opts.model || n.arguments.some((a) => a.type === 'SpreadElement') ? null
+    // Where `model:` (or `agentType:`) can be spliced in when the call has none: after the options'
+    // `{`, or as a new options argument. Never beside a spread, a computed or quoted key of that name,
+    // or a variable: any of them could already set it, and an insert would then change bytes but not
+    // behaviour. A spread argument hides which position the options land in: `agent(...args, { model })`
+    // may be a third argument the call ignores while this page reads it as the options.
+    const insertFor = (key) => !isAgent || opts[key] || n.arguments.some((a) => a.type === 'SpreadElement') ? null
       : optsArg?.type === 'ObjectExpression'
-        ? (optsArg.properties.some((p) => p.type !== 'Property' || p.computed || (p.key?.name ?? p.key?.value) === 'model') ? null
+        ? (optsArg.properties.some((p) => p.type !== 'Property' || p.computed || (p.key?.name ?? p.key?.value) === key) ? null
           : { at: optsArg.start + 1, empty: !optsArg.properties.length })
         : !optsArg && promptArg && n.arguments.length === 1 ? { at: promptArg.end, arg: true } : null;
+    const modelInsert = insertFor('model'), typeInsert = insertFor('agentType');
     // The innermost loop whose BODY holds the call, and whether its pass count is a literal: for-of
     // over an inline or module-const array, or `i < 5`. Anything else is unbounded to this page.
     const loopAnc = stack.find((a, i) => /^(While|DoWhile|For|ForOf|ForIn)Statement$/.test(a.type) && (i === 0 ? n : stack[i - 1]) !== a.test);
@@ -324,6 +327,7 @@ function extract(src) {
       effort: optVal('effort'),
       effortSpan: opts.effort?.type === 'Literal' ? [opts.effort.start, opts.effort.end] : null,
       isolation: optVal('isolation'), agentType: optVal('agentType'),
+      agentTypeSpan: opts.agentType?.type === 'Literal' ? [opts.agentType.start, opts.agentType.end] : null, typeInsert,
       schemaKeys: schema?.type === 'ObjectExpression' ? schema.properties.map((p) => p.key?.name || p.key?.value).filter(Boolean) : (opts.schema ? ['⟨' + sourceOf(src, opts.schema) + '⟩'] : null),
       phase: lit(opts.phase) || phaseAt(n.start),
       mission, missionSpan, missionKind, assembled,
@@ -748,6 +752,10 @@ function escapeForSpan(text, kind) {
 }
 
 const TIERS = ['fable', 'opus', 'sonnet', 'haiku'];
+// An agent-type name is a verbatim registry name (`(@_@) engineer`): anything goes except what could
+// close or reopen the literal it is written into. Refused, never escaped — the same check as
+// advise.mjs's catalog, which never offers such a name.
+const spliceableType = (s) => typeof s === 'string' && s.length > 0 && s.length <= 100 && !/['"`\\\r\n\u2028\u2029]|\$\{/.test(s);
 function applyEdits(src, nodes, edits) {
   const ops = [];
   for (const n of nodes) {
@@ -755,15 +763,19 @@ function applyEdits(src, nodes, edits) {
     if (!e) continue;
     if (e.mission !== undefined && n.missionSpan) ops.push({ span: n.missionSpan, text: escapeForSpan(e.mission, n.missionKind) });
     // An inherited model gets a new `model:` key, and only a known tier: 'inherited' is the absence
-    // of the key, never a value to write.
-    if (e.model !== undefined && !n.modelSpan && n.modelInsert && TIERS.includes(e.model)) {
-      const kv = `model: '${e.model}'`, at = n.modelInsert.at;
-      ops.push({ span: [at, at], text: n.modelInsert.arg ? `, { ${kv} }` : n.modelInsert.empty ? ` ${kv} ` : ` ${kv},` });
+    // of the key, never a value to write. A missing agentType likewise. Both land in ONE insert:
+    // two appended options objects would leave the second one ignored by the call.
+    const kvs = [], at = [];
+    if (e.model !== undefined && !n.modelSpan && n.modelInsert && TIERS.includes(e.model)) { kvs.push(`model: '${e.model}'`); at.push(n.modelInsert); }
+    if (e.agentType !== undefined && !n.agentTypeSpan && n.typeInsert && spliceableType(e.agentType)) { kvs.push(`agentType: '${e.agentType}'`); at.push(n.typeInsert); }
+    if (kvs.length) {
+      const kv = kvs.join(', '), ins = at[0];   // both inserts of a call sit at the same point
+      ops.push({ span: [ins.at, ins.at], text: ins.arg ? `, { ${kv} }` : ins.empty ? ` ${kv} ` : ` ${kv},` });
     }
     // Tier and effort are bare identifiers-in-quotes; a value outside [a-z0-9.-] would be a bug
     // in the select, not in the script, so refuse rather than escape.
-    for (const [k, span] of [['model', n.modelSpan], ['effort', n.effortSpan]]) {
-      if (e[k] === undefined || !span || !/^[a-z0-9.-]+$/i.test(e[k])) continue;
+    for (const [k, span, ok] of [['model', n.modelSpan, (v) => /^[a-z0-9.-]+$/i.test(v)], ['effort', n.effortSpan, (v) => /^[a-z0-9.-]+$/i.test(v)], ['agentType', n.agentTypeSpan, spliceableType]]) {
+      if (e[k] === undefined || !span || !ok(e[k])) continue;
       const quote = src[span[0]];   // reuse the source's own delimiter, never emit one
       ops.push({ span, text: quote + e[k] + quote });
     }
@@ -774,16 +786,19 @@ function applyEdits(src, nodes, edits) {
   return out;
 }
 
-// A tier edit, checked before it is taken: the spliced script must parse AND re-extract with that
-// tier on that call site — a parse alone would pass an insert some other key silently overrides.
-function withModel(src, nodes, edits, id, tier) {
-  const next = { ...edits, [id]: { ...edits[id], model: tier } };
+// A tier or agent-type edit, checked before it is taken: the spliced script must parse AND re-extract
+// with that value on that call site — a parse alone would pass an insert some other key silently
+// overrides, and a refused name would pass as a no-op.
+function withOpt(src, nodes, edits, id, key, value) {
+  const next = { ...edits, [id]: { ...edits[id], [key]: value } };
   let g;
   try { g = extract(applyEdits(src, nodes, next)); } catch (e) { return { error: `the edited script would not parse (${e.message})` }; }
   const i = nodes.findIndex((x) => x.id === id);
-  if (g.nodes[i]?.model !== tier) return { error: `the call would still not run on ${tier}` };
+  if (g.nodes[i]?.[key] !== value) return { error: key === 'model' ? `the call would still not run on ${value}` : `the call would still not get ${key} ${value}` };
   return { edits: next };
 }
+function withModel(src, nodes, edits, id, tier) { return withOpt(src, nodes, edits, id, 'model', tier); }
+function withType(src, nodes, edits, id, type) { return withOpt(src, nodes, edits, id, 'agentType', type); }
 
 // What the differing suggestions are worth, from the server's per-token price table (cost.mjs). No
 // run-size estimate: the ratio is exact, a dollar figure would not be. The page does not know the
@@ -816,13 +831,31 @@ const LINTS = [
   { id: 'wide-no-model', w: 2, test: (n, m) => n.fanOut?.n > 10 && m === 'inherited', msg: (n) => `×${n.fanOut.n} with no model: — every one on the session's model` },
 ];
 const FX_FLOOR = 0.7;
-function needsEyes(nodes, modelOf, advice, max = 3) {
+// A mission that invokes a skill needs the Skill tool. The default workflow subagent is not documented
+// to have it; a type with an explicit tool list lacks it unless listed, but a skill it PRELOADS needs no
+// tool. A type the catalog does not know (or a computed one) is left alone: its tools are unknown here.
+// ponytail: the word "skill" in the mission is the trigger — a bare `/command` is missed; add when seen.
+function skillGap(text, type, catalog) {
+  if (!/\bskills?\b/i.test(text) || type === 'computed') return null;
+  const name = (text.match(/`?\/?([a-z][\w:-]*)`?\s+skill\b/i) || text.match(/\bskill\s+`?\/?([a-z][\w:-]*)/i))?.[1] || null;
+  const t = type ? catalog?.find((c) => c.name === type) : null;
+  if (type && !t) return null;
+  if (t) {
+    const hasSkill = /^all\b/i.test(t.tools) ? !/\bSkill\b/.test(t.tools) : /\bSkill\b/.test(t.tools);
+    const preloads = name && (t.skills || []).some((s) => s === name || s.split(':').pop() === name.split(':').pop());
+    if (hasSkill || preloads) return null;
+  }
+  return `the mission uses ${name ? `the ${name} skill` : 'a skill'}, but ${type ? `${type} has no Skill tool` : 'the default subagent is not documented to have the Skill tool'} — agentType 'general-purpose' has it`;
+}
+function needsEyes(nodes, modelOf, advice, max = 3, { typeOf = (n) => n.agentType, textOf = (n) => n.assembled } = {}) {
   const out = [];
   for (const n of nodes) {
     if (n.kind !== 'agent') continue;
     const m = modelOf(n), why = [];
     let score = 0;
     for (const r of LINTS) if (r.test(n, m)) { score += r.w; why.push(r.msg(n, m)); }
+    const gap = skillGap(textOf(n) || '', typeOf(n), advice?.catalog);
+    if (gap) { score += 2; why.push(gap); }
     const fx = advice?.fx?.[n.id];
     if (fx >= FX_FLOOR) {
       score += 2 + (advice.stakes?.level ?? 1);       // a side effect weighs more on a consequential run
@@ -897,6 +930,7 @@ const assembledNow = (n) => (n.missionSpan && edits[n.id]?.mission !== undefined
   : n.assembled);
 const currentModel = (n) => (edits[n.id]?.model !== undefined ? edits[n.id].model : n.model);
 const currentEffort = (n) => (edits[n.id]?.effort !== undefined ? edits[n.id].effort : n.effort);
+const currentType = (n) => (edits[n.id]?.agentType !== undefined ? edits[n.id].agentType : n.agentType);
 
 function pushHistory() { history.push(JSON.stringify(edits)); future = []; refreshButtons(); }
 function undo() { if (!history.length) return; future.push(JSON.stringify(edits)); edits = JSON.parse(history.pop()); afterEdit(); }
@@ -1143,7 +1177,7 @@ function css(v) { return getComputedStyle(document.documentElement).getPropertyV
 function nodeLabel(n) {
   // The face: phase · name ×N / purpose / model · effort. Everything else is side panel.
   const mult = n.fanOut ? (n.fanOut.n !== null ? `  ×${n.fanOut.n}` : '  ×?') : '';
-  const tier = `${currentModel(n)} · ${currentEffort(n) || 'effort inherited'}` + (n.isolation === 'worktree' ? ' · worktree' : '') + (n.schemaKeys ? ' · schema' : '') + (n.agentType ? ' · @' + n.agentType : '');
+  const tier = `${currentModel(n)} · ${currentEffort(n) || 'effort inherited'}` + (n.isolation === 'worktree' ? ' · worktree' : '') + (n.schemaKeys ? ' · schema' : '') + (currentType(n) ? ' · @' + currentType(n) : '');
   // A computed label reads better as `survey:⟨slug⟩` than as its raw template source.
   const name = n.labelDynamic ? n.label.replace(/^`|`$/g, '').replace(/\$\{([^}]*)\}/g, '⟨$1⟩') : n.label;
   const head = (n.phase ? n.phase.toUpperCase() + ' · ' : '') + name + mult;
@@ -1195,10 +1229,32 @@ function renderPanel(el) {
   // can be spliced back; an inherited model gets the words, not a button.
   const tip = ADVICE?.agents?.[n.id];
   const tierRow = tip?.low
-    ? ` <span class="dim">· Jev: ? (low confidence, ${Math.round(tip.confidence * 100)}% — under its ${Math.round(tip.floor * 100)}% floor)</span>`
+    ? `<small>Jev: ? (low confidence, ${Math.round(tip.confidence * 100)}% — under its ${Math.round(tip.floor * 100)}% floor)</small>`
     : tip && tip.tier !== currentModel(n)
-    ? ` <span class="dim">· Jev: <b>${escapeHtml(tip.tier)}</b> — ${escapeHtml(tip.level.toLowerCase())} (${Math.round(tip.confidence * 100)}%)${n.modelSpan || n.modelInsert ? ` <button id="applytier" type="button">apply</button>` : ' — add <code>model:</code> to the call to change it'}</span>`
-    : tip ? ` <span class="dim">· Jev agrees (${Math.round(tip.confidence * 100)}%)</span>` : '';
+    ? `<small>Jev: <b>${escapeHtml(tip.tier)}</b> — ${escapeHtml(tip.level.toLowerCase())} (${Math.round(tip.confidence * 100)}%)${n.modelSpan || n.modelInsert ? ` <button id="applytier" type="button">apply</button>` : ' — add <code>model:</code> to the call to change it'}</small>`
+    : tip ? `<small>Jev agrees (${Math.round(tip.confidence * 100)}%)</small>` : '';
+  // agentType is agent()'s only tool boundary, so it sits with the other routing choices: a select over
+  // the catalog the server read (when it did, and the literal can be spliced back), the tools that
+  // choice grants, then Jev's pick with its tools and source — reviewable, not a name to trust.
+  // '(none)' is advise.mjs's NO_TYPE: the absence of the key, never a value to write.
+  const curType = currentType(n), tt = ADVICE?.types?.[n.id], catalog = ADVICE?.catalog;
+  const pct = (x) => Math.round(x * 100);
+  const canType = (n.agentTypeSpan || n.typeInsert) && curType !== 'computed';
+  const typeCtl = canType && catalog?.length
+    ? choice('agenttype', curType || '(none)', catalog.map((t) => t.name).filter((t) => t !== '(none)' || !n.agentTypeSpan))
+    : curType === 'computed' ? `<span class="dim">decided at runtime</span>`
+    : curType ? `<code>${escapeHtml(curType)}</code>` : `<span class="dim">none — the default workflow subagent</span>`;
+  const typeDef = curType && curType !== 'computed' ? catalog?.find((t) => t.name === curType) : null;
+  const typeTools = !curType ? `<small class="warn">tools: every MCP tool connected to the session, writes included</small>`
+    : typeDef ? `<small>tools: ${escapeHtml(typeDef.tools)} · ${escapeHtml(typeDef.source)}</small>`
+    : `<small>tools: unknown — this page did not read that definition</small>`;
+  const typeTip = !tt ? ''
+    : tt.low ? `<small>Jev: ? ${tt.alts?.length > 1
+        ? `— hesitates between ${tt.alts.map((a) => `<b>${escapeHtml(a.type ?? '(none)')}</b> (${pct(a.p)}%)`).join(' and ')}, under its ${pct(tt.floor)}% floor: pick in the list`
+        : `(low confidence, ${pct(tt.confidence)}% — under its ${pct(tt.floor)}% floor)`}</small>`
+    : tt.type === (curType || null) ? `<small>Jev agrees (${pct(tt.confidence)}%)</small>`
+    : tt.type === null ? `<small>Jev: <b>(none)</b> — the default subagent would do (${pct(tt.confidence)}%); remove <code>agentType</code> by hand</small>`
+    : `<small>Jev: <b>${escapeHtml(tt.type)}</b> — ${escapeHtml(tt.tools)} · ${escapeHtml(tt.source)} (${pct(tt.confidence)}%)${canType ? ' <button id="applytype" type="button">apply</button>' : ' — add <code>agentType:</code> to the call to change it'}</small>`;
   const effortRow = n.effortSpan ? choice('effort', currentEffort(n), ['low', 'medium', 'high', 'xhigh', 'max'])
     : n.effort === 'computed' ? `<span class="dim">decided at runtime</span>` : `<span class="dim">inherited — the session's effort</span>`;
   // The assembled prompt with every ⟨expr⟩ as a chip; an upstream chip selects its producer.
@@ -1223,6 +1279,7 @@ function renderPanel(el) {
       <dl class="rows">
         <dt>model</dt><dd>${modelRow}${tierRow}</dd>
         <dt>effort</dt><dd>${effortRow}</dd>
+        <dt>agentType</dt><dd>${typeCtl}${typeTools}${typeTip}</dd>
         <dt>phase</dt><dd>${escapeHtml(n.phase || '(none)')}</dd>
         ${pastSite(n)}
         ${fan ? `<dt>fan-out</dt><dd>${fan}${n.fanOut.labels ? `<small>${n.fanOut.labels.map(escapeHtml).join(' · ')}</small>` : ''}</dd>` : ''}
@@ -1246,12 +1303,8 @@ function renderPanel(el) {
       <dl class="rows">
         <dt>isolation</dt><dd>${n.isolation === 'worktree' ? '<b>worktree</b> — this agent is expected to mutate files' : n.isolation === 'computed' ? '<span class="dim">decided at runtime</span>' : '<span class="dim">none — works in the shared checkout</span>'}</dd>
         <dt>schema</dt><dd>${n.schemaKeys ? `structured output: <code>${n.schemaKeys.map(escapeHtml).join(', ')}</code>` : '<span class="dim">none — free-text result</span>'}</dd>
-        <dt>agentType</dt><dd>${n.agentType ? `<code>${escapeHtml(n.agentType)}</code>` : '<span class="dim">none — the default workflow subagent</span>'}</dd>
         ${n.writesTo?.length ? `<dt>writes to</dt><dd><code>${n.writesTo.map(escapeHtml).join('</code><br><code>')}</code> <span class="dim">— from the prompt text</span></dd>` : ''}
       </dl>
-      <p class="sentence">${n.agentType
-        ? `Tools come from the <code>${escapeHtml(n.agentType)}</code> agent definition; this page does not read it, so treat its tool list as unknown.`
-        : `Without <code>agentType</code> this agent can reach <b>every MCP tool connected to the session, writes included</b> — discovered at runtime via ToolSearch. Nothing in this script narrows that.`}</p>
     </section>
   `;
   for (const chip of panel.querySelectorAll('.chip.go')) chip.onclick = () => { const t = cy.$id(chip.dataset.go); cy.$(':selected').unselect(); t.select(); select(t); cy.animate({ center: { eles: t }, duration: 200 }); };
@@ -1263,6 +1316,14 @@ function renderPanel(el) {
   };
   const applyTier = $('applytier');
   if (applyTier) applyTier.onclick = () => setModel(n, tip.tier);
+  const applyType = $('applytype');
+  if (applyType) applyType.onclick = () => setType(n, tt.type);
+  // Back to (none) on a call that had no agentType: drop the edit, the splice would insert nothing.
+  const typeSel = $('agenttype');
+  if (typeSel) typeSel.onchange = () => {
+    if (typeSel.value === '(none)') { pushHistory(); delete edits[n.id]?.agentType; if (edits[n.id] && !Object.keys(edits[n.id]).length) delete edits[n.id]; return afterEdit(); }
+    setType(n, typeSel.value);
+  };
   const effort = $('effort');
   if (effort) effort.onchange = () => { pushHistory(); (edits[n.id] ||= {}).effort = effort.value; afterEdit(); };
   const mission = $('mission');
@@ -1278,8 +1339,9 @@ function renderPanel(el) {
   }
 }
 // One human click, one agent. Refused, with the reason in the status line, if the splice fails its check.
-function setModel(n, tier) {
-  const r = withModel(SRC, GRAPH.nodes, edits, n.id, tier);
+function setModel(n, tier) { applyChecked(n, withModel(SRC, GRAPH.nodes, edits, n.id, tier)); }
+function setType(n, type) { applyChecked(n, withType(SRC, GRAPH.nodes, edits, n.id, type)); }
+function applyChecked(n, r) {
   if (r.error) { $('status').className = 'status blocked'; $('status').textContent = `${n.label}: not applied — ${r.error}.`; renderPanel(cy.$id(n.id)); return; }
   pushHistory(); edits = r.edits; afterEdit();
 }
@@ -1509,7 +1571,7 @@ async function askAdvice() {
 // after the human downgraded that agent.
 let EYES = { ids: [], why: {}, at: -1 };
 function refreshEyes() {
-  const { top, total } = needsEyes(GRAPH.nodes, currentModel, ADVICE);
+  const { top, total } = needsEyes(GRAPH.nodes, currentModel, ADVICE, 3, { typeOf: currentType, textOf: assembledNow });
   EYES = { ids: top.map((t) => t.id), why: Object.fromEntries(top.map((t) => [t.id, t.why])), at: -1 };
   cy.elements().removeClass('eyes');
   for (const t of top) {
@@ -1558,13 +1620,16 @@ function jevBanner() {
   const agents = GRAPH.nodes.filter((x) => x.kind === 'agent');
   const n = agents.filter((x) => a.agents[x.id]?.tier).length, low = agents.filter((x) => a.agents[x.id]?.low).length;
   const differ = agents.filter((x) => a.agents[x.id]?.tier && a.agents[x.id].tier !== currentModel(x)).length;
+  const typed = agents.filter((x) => a.types?.[x.id] && !a.types[x.id].low);
+  const typeDiffer = typed.filter((x) => a.types[x.id].type !== (currentType(x) || null)).length;
   $('jev').textContent = 'Jev: ' + [
     a.kind ? a.kind.choice : null,
     a.stakes ? 'stakes ' + a.stakes.text : null,
     n ? `tiers for ${n} agent${n === 1 ? '' : 's'}${differ ? ` (${differ} differ — select an agent to apply)` : ' (all as written)'}` : null,
+    typed.length ? `agent types for ${typed.length}${typeDiffer ? ` (${typeDiffer} differ)` : ' (all as written)'}` : null,
     ...priceDelta(agents, a, currentModel),
     low ? `${low} low confidence` : null,
-  ].filter(Boolean).join(' · ') + ' — agent missions were sent to api.typesafe.ai';
+  ].filter(Boolean).join(' · ') + (a.catalog?.length ? ' — agent missions and your agent-type descriptions were sent to api.typesafe.ai' : ' — agent missions were sent to api.typesafe.ai');
   $('jev').hidden = false;
 }
 

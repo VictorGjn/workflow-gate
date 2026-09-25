@@ -12,7 +12,7 @@ const EDITOR = process.argv[2] || fileURLToPath(new URL('../graph-editor.html', 
 const html = readFileSync(EDITOR, 'utf8');
 const body = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
 const pure = body.slice(0, body.indexOf('// ---------------------------------------------------------------- state'));
-const F = new Function('acorn', pure + '\n return { extract, applyEdits, withModel, priceDelta, needsEyes, diffGraphs };')(acorn);
+const F = new Function('acorn', pure + '\n return { extract, applyEdits, withModel, withType, priceDelta, needsEyes, diffGraphs };')(acorn);
 
 let pass = 0, fail = 0;
 const check = (n, ok, d = '') => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? ' — ' + d : ''}`); };
@@ -40,6 +40,28 @@ check('workflow() is not an agent: no insert point', F.extract(`await workflow('
   check('an existing literal model is replaced, not inserted', F.applyEdits(`agent('x', { model: "opus" })`, F.extract(`agent('x', { model: "opus" })`).nodes, { a0: { model: 'haiku' } }) === `agent('x', { model: "haiku" })`);
 }
 check('withModel refuses a tier the call would not end up running on', !!F.withModel(`agent('x', opts)`, F.extract(`agent('x', opts)`).nodes, {}, 'a0', 'haiku').error);
+
+// ---- agentType: Jev's tool routing, spliced like a tier ----------------------------------------
+{
+  const insT = (src, type, tier) => {
+    const g = F.extract(src);
+    let r = F.withType(src, g.nodes, {}, 'a0', type);
+    if (r.edits && tier) r = F.withModel(src, g.nodes, r.edits, 'a0', tier);
+    return r.edits ? F.applyEdits(src, g.nodes, r.edits) : r;
+  };
+  check('agentType spliced after the brace', insT(`await agent('x', { label: 'scan' })`, 'Explore') === `await agent('x', { agentType: 'Explore', label: 'scan' })`, j(insT(`await agent('x', { label: 'scan' })`, 'Explore')));
+  check('an emoji registry name is spliced verbatim', insT(`await agent('x', {})`, '(@_@) engineer') === `await agent('x', { agentType: '(@_@) engineer' })`, j(insT(`await agent('x', {})`, '(@_@) engineer')));
+  check('model + agentType on a call with no options: ONE options object', insT(`await agent('x')`, 'Explore', 'haiku') === `await agent('x', { model: 'haiku', agentType: 'Explore' })`, j(insT(`await agent('x')`, 'Explore', 'haiku')));
+  check('model + agentType into an existing object', insT(`await agent('x', { label: 'l' })`, 'Plan', 'sonnet') === `await agent('x', { model: 'sonnet', agentType: 'Plan', label: 'l' })`, j(insT(`await agent('x', { label: 'l' })`, 'Plan', 'sonnet')));
+  check('an existing literal agentType is replaced, its quotes kept', insT(`agent('x', { agentType: "general-purpose" })`, 'Explore') === `agent('x', { agentType: "Explore" })`, j(insT(`agent('x', { agentType: "general-purpose" })`, 'Explore')));
+  check('a name with a quote is refused, not escaped', !!insT(`await agent('x', {})`, "it's").error);
+  check('a name with a template opener is refused', !!insT(`await agent('x', {})`, 'a${b}').error);
+  check("quoted 'agentType' key: no insert point", F.extract(`await agent('x', { 'agentType': 'Plan' })`).nodes[0].typeInsert === null);
+  check('computed agentType: neither span nor insert', ((n) => n.agentTypeSpan === null && n.typeInsert === null)(F.extract(`await agent('x', { agentType: t })`).nodes[0]));
+  check('spread: no agentType insert', F.extract(`await agent('x', { ...base })`).nodes[0].typeInsert === null);
+  check('workflow() takes no agentType', F.extract(`await workflow('w')`).nodes[0].typeInsert === null);
+  check('a model insert still lands when agentType is already written', insT(`agent('x', { agentType: 'Plan' })`, 'Plan', 'haiku') === `agent('x', { model: 'haiku', agentType: 'Plan' })`, j(insT(`agent('x', { agentType: 'Plan' })`, 'Plan', 'haiku')));
+}
 
 // ---- G7: price delta ------------------------------------------------------------------------
 {
@@ -84,6 +106,30 @@ await agent('read only', { model: 'haiku' })`;
   check('a confident side-effect flag from Jev ranks, labelled as advice', withFx.top[0].id === 'a4' && /Jev \(advice, 90%\)/.test(withFx.top[0].why[0]), j(withFx.top[0]));
   check('under the 0.7 floor it does not', !withFx.top.some((t) => t.id === 'a5') && withFx.total === 4, j(withFx));
   check('a downgrade the human applied clears the top-tier lint', !F.needsEyes(g.nodes, (n) => (n.id === 'a0' ? 'haiku' : n.model), null).top.some((t) => t.id === 'a0'));
+}
+
+// ---- a mission that invokes a skill, on an agent type that cannot ------------------------------
+{
+  const say = 'Use the typesafe-ai skill to score the findings.';
+  const src = [`await agent('${say}', { label: 'a' })`, `await agent('${say}', { label: 'b', agentType: 'general-purpose' })`,
+    `await agent('${say}', { label: 'c', agentType: 'workflow-gate:review' })`, `await agent('${say}', { label: 'd', agentType: 'workflow-gate:verify' })`,
+    `await agent('Refute this finding.', { label: 'e' })`, `await agent('${say}', { label: 'f', agentType: 'mystery' })`,
+    `await agent('${say}', { label: 'g', agentType: 'Explore' })`].join('\n');
+  const catalog = [{ name: 'general-purpose', tools: 'all tools', skills: [] }, { name: 'Explore', tools: 'all except Agent, Edit, Write, NotebookEdit', skills: [] },
+    { name: 'workflow-gate:review', tools: 'Read, Grep, Glob, Bash', skills: ['typesafe:typesafe-ai'] }, { name: 'workflow-gate:verify', tools: 'Read, Grep, Glob, Bash, WebFetch', skills: [] }];
+  const g = F.extract(src), model = (n) => n.model;
+  const gap = (r) => new Set(r.top.filter((t) => t.why.some((w) => /general-purpose/.test(w))).map((t) => t.id));
+  const e = gap(F.needsEyes(g.nodes, model, { catalog }, 10));
+  check('no agentType: the default subagent is not documented to have the Skill tool', e.has('a0'));
+  check('general-purpose has it', !e.has('a1'));
+  check('a type that preloads the named skill needs no Skill tool', !e.has('a2'));
+  check('an explicit tool list without Skill is flagged', e.has('a3'));
+  check('no skill in the mission, no flag', !e.has('a4'));
+  check('a type the catalog does not know is left alone', !e.has('a5'));
+  check('"all except …" keeps Skill', !e.has('a6'));
+  check('without Jev (no catalog) the no-agentType case still shows', gap(F.needsEyes(g.nodes, model, null, 10)).has('a0'));
+  check('an agentType the human applied clears it', !gap(F.needsEyes(g.nodes, model, { catalog }, 10, { typeOf: (n) => (n.id === 'a0' ? 'general-purpose' : n.agentType) })).has('a0'));
+  check('the mission as edited is what counts', !gap(F.needsEyes(g.nodes, model, { catalog }, 10, { textOf: (n) => (n.id === 'a0' ? 'Refute this.' : n.assembled) })).has('a0'));
 }
 
 // ---- G9: diff against the last approved text ---------------------------------------------------

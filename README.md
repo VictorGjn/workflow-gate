@@ -86,6 +86,7 @@ Static estimate for the script as submitted (call-site counts, not runtime count
 | | **Needs your eyes**: unbounded loops, top-tier fan-outs, missions that push, deploy or delete | Your attention goes where the risk is |
 | | **Past spend** of this workflow (median / p75 / max, with `n` and dates) | A dollar figure before you click, from runs that actually happened |
 | | Optional **model-tier advice** from [Jev](https://docs.typesafe.ai) with a price delta; stricter when the stakes are high | Cheaper tiers where a mission is mechanical. Advice only |
+| | Optional **agent-type (tool) routing** from Jev, with the tools each type grants and where it was defined; when unsure, it names the two types it hesitated between | `agentType` is an agent's only tool boundary. Advice only |
 | **During the run** | Live graph: per-node state, `k/N done`, spend so far, spend cap alerts | "Already $180 at minute twenty" arrives while you can still stop it |
 | **After the run** | History of every run on the machine, **priced from real token usage** (each message counted once) | Cost is measured, not estimated |
 | | Opt-in outcome check: did each agent actually deliver? | Cheap failures stop looking like cheap successes |
@@ -143,11 +144,15 @@ Auto-allow is capped at two rounds, then escalates anyway: repeated capability c
 
 </details>
 
+## Agent types included
+
+Seven lean agent types ship in [`plugin/agents/`](plugin/agents), for `agent(prompt, { agentType })`: `workflow-gate:dev`, `:review` (reports every finding, then Jev scores each), `:verify` (tries to refute one finding), `:debug`, `:research`, `:judge` and `:synthesis`. Each is 80–210 words with an explicit tool list: no persona, no checklist, no output format. Details and sources: [`plugin/README.md`](plugin/README.md).
+
 ## Where it fits
 
 | | Content-pinned approval | Visual review of the graph | Measured cost | Model-tier guidance | Capability escalation |
 |---|:---:|:---:|:---:|:---:|:---:|
-| **workflow-gate** | ✅ SHA-256, re-gates on edit | ✅ flowchart, diff, live run | ✅ from token usage | ✅ skill + Jev advice | ✅ advisor-judged |
+| **workflow-gate** | ✅ SHA-256, re-gates on edit | ✅ flowchart, diff, live run | ✅ from token usage | ✅ skill + Jev advice (tier and agent type) | ✅ advisor-judged |
 | Claude Code's built-in prompt | ⚠️ bypassable by permission mode | ❌ | ❌ | ❌ | ❌ |
 | Generic guardrail hooks | ⚠️ broad Bash/Write blocking | ❌ | ❌ | ❌ | ❌ |
 
@@ -157,7 +162,7 @@ Auto-allow is capped at two rounds, then escalates anyway: repeated capability c
 |---|---|
 | `WORKFLOW_GATE_OFF=1` | Kill switch: the gate steps aside entirely |
 | `WORKFLOW_GATE_NO_UI=1` | No browser; the text flow above everywhere |
-| `TYPESAFE_API_KEY` | Enables Jev's intent and model-tier advice in the editor. Only the extracted skeleton (name, phases, one mission per agent) leaves the machine |
+| `TYPESAFE_API_KEY` | Enables Jev's intent, model-tier and agent-type advice in the editor. What leaves the machine: the extracted skeleton (name, phases, one mission per agent) and the agent-type catalog (names, descriptions up to 200 chars, tool lists) |
 | `WORKFLOW_GATE_OUTCOME=1` | With the key: after each run, Jev checks whether each agent delivered. Opt-in, results truncated to 1.5 KB |
 
 `node plugin/hooks/workflow-plan-gate.mjs history` opens the history viewer. Full technical documentation: [`plugin/README.md`](plugin/README.md).

@@ -39,12 +39,13 @@ fan-out over a module-scope literal array counts its length, a runtime fan-out c
 against every recorded run on the author's machine (`hooks/test/extract-v2-test.mjs`): the bound never
 exceeds the real count. Edges are typed, never a phase cross-product: solid = a prior result is
 interpolated into this prompt, dashed = the target sits under a JS condition, whose predicate is drawn
-verbatim; a faint lane→lane edge means "order only, nothing passed". The panel shows model and effort
-(editable only where a literal exists — otherwise "inherited" or "decided at runtime", never a
-fabricated default), the assembled prompt with every `⟨interpolation⟩` as a chip that opens its
+verbatim; a faint lane→lane edge means "order only, nothing passed". The panel shows model, effort
+and agentType together (editable only where a literal exists or can be inserted — otherwise
+"inherited" or "decided at runtime", never a fabricated default), and under agentType the tools it
+grants — flagged when there is none: the agent then reaches every MCP tool connected to the session,
+writes included. Then the assembled prompt with every `⟨interpolation⟩` as a chip that opens its
 producer, what each chip resolves to (upstream result — flagged when it may contain `null` — shared
-constant, per-item value, or runtime), isolation, schema keys, agentType, and the sentence that
-matters: without `agentType` the agent reaches every MCP tool connected to the session, writes included.
+constant, per-item value, or runtime), isolation and schema keys.
 
 **During a run.** *Approve & run* no longer ends the page. The tab that approved the plan keeps the
 same graph and paints the run onto it as it happens: per-node state, `k/N done` against the declared
@@ -83,6 +84,63 @@ never approves or denies anything; the human still does. **Egress:** the skeleto
 — workflow name, phases, one mission per agent (≤ 1500 chars each), never the whole file — is sent
 to `api.typesafe.ai` from the local server (the key never reaches the browser); the header says so
 whenever it happened. No key, no call, nothing shown.
+
+**Tool routing (agent types, same call).** `agent()` has no `tools` option: `agentType` is its only
+tool boundary. The same request asks, per agent, which agent type should run it, over the catalog the
+local server reads: `(none)` (the default subagent, the norm), the built-ins `general-purpose`,
+`Explore` and `Plan`, then `<project>/.claude/agents`, then the agents this plugin ships and those
+of every plugin enabled in your user settings, as `<plugin>:<name>` (first name wins; names
+verbatim, emoji included; a name holding a quote, a backslash or `${` is skipped). `~/.claude/agents`
+is deliberately not read: personal definitions drift, and the package ships the ones a workflow
+should reach for. The catalog stops at 32 types. Once Jev has answered, `agentType` becomes a select
+over that catalog, and the pick shows under it with the type's tools and where it was defined
+(`built-in` / `project` / `plugin`). **apply** (or the select) splices `agentType:` in; a `model:`
+inserted in the same call lands in the same options object. A pick of `(none)` against a written
+type is shown, not applied: removing the key is left to you. Under the 50% floor there is no
+suggestion and no fallback: the panel names the two types Jev hesitated between, with their
+probabilities, and the choice stays yours. A mission that says it uses a skill, on an agent type
+without the Skill tool that does not preload it (or with no `agentType`: the default subagent is not
+documented to have it), is listed under **needs your eyes** with `general-purpose` as the way out. A project
+definition can be written by the agents this gate constrains, which is why its source and tools
+are shown next to the pick. **Egress:** each type's name, description (≤ 200 chars) and tool list
+go in the same request; the header says so.
+
+**Agent types shipped with the plugin** (`agents/`). Each preloads a skill; a plugin agent cannot
+enable a plugin, and Claude Code ignores `hooks`, `mcpServers` and `permissionMode` in plugin agents,
+so a skill plus a tool list is the whole lever.
+
+| `agentType` | Tools | Preloads | For |
+|---|---|---|---|
+| `workflow-gate:dev` | all | `ponytail:ponytail` | build and fix phases: one scoped change, test first |
+| `workflow-gate:review` | Read, Grep, Glob, Bash | `typesafe:typesafe-ai` | review and audit: reports every finding, then scores each with Jev (needs `TYPESAFE_API_KEY`) |
+| `workflow-gate:verify` | Read, Grep, Glob, Bash, WebFetch | — | tries to refute one finding another agent produced: CONFIRMED / REFUTED / UNPROVEN |
+| `workflow-gate:debug` | Read, Grep, Glob, Bash | — | root cause of one failure by testing hypotheses; describes the fix, applies nothing |
+| `workflow-gate:research` | WebSearch, WebFetch, Read, Grep, Glob | — | one question from outside the codebase, a source link behind every claim |
+| `workflow-gate:judge` | Read, Grep, Glob | — | grades one artifact against the mission's rubric, criterion by criterion |
+| `workflow-gate:synthesis` | Read, Grep, Glob | `i-have-adhd` | the final summary a person acts on |
+
+Each prompt is 80–210 words: the role, what counts as evidence, what comes back — no persona, no
+checklist, no output format (a `schema` on the `agent()` call already fixes the shape). Not shipped,
+on purpose: an architect (built-in `Plan`), an explorer (built-in `Explore`), a test writer (`dev`,
+or `code-modernization:test-engineer`), and a silent-failure reviewer (a lens to name in a `review`
+mission). `research` has no Firecrawl: MCP tools are reachable only when listed, and a plugin cannot
+know which ones a session has.
+
+Written in our own words after reading the lean end of what is on GitHub, with credit to:
+celestiaorg/celestia-app `finding-verifier` (Apache-2.0: the REFUTED / CONFIRMED / UNPROVEN verdict),
+cockroachdb/pebble `bug-confirmer` (BSD-3-Clause: surprising ≠ incorrect), iota-uz/iota-sdk `debugger`
+(Apache-2.0: hypotheses confirmed or refuted), recomposesh/recompose `researcher` (MIT: a stated gap
+beats a guess), buildinternet/releases `rubric-grader` (Apache-2.0: fail on no evidence, verdict last)
+and anthropics/skills `grader` (Apache-2.0: substance, not surface compliance). The large collections
+(VoltAgent, wshobson, rohitg00) were read and passed over: personas, generic checklists and invented
+protocols in most files.
+
+A skill that is missing, or that sets `disable-model-invocation: true`, is skipped at preload: the
+agent still runs, without it. `ponytail`, `typesafe` and an `i-have-adhd` skill are therefore
+recommended, not required. The review agent reports everything and leaves filtering to Jev because
+Anthropic's Claude Opus 5 prompting guide finds that a "report only serious issues" review misses
+real bugs; the legacy and uplift specialists come from the `code-modernization` plugin, whose agents
+the catalog lists when it is enabled.
 
 ## History, cost, and what you thought of it
 

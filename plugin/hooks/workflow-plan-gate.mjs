@@ -214,7 +214,7 @@ async function priorsLines(est, content) {
 //
 // Returns { base, stateUrl, since, reattached }, or null if anything at all went wrong — the text
 // flow is always still there. `base` carries no nonce: it is safe to print.
-async function openEditor(scriptPath, fp, session) {
+async function openEditor(scriptPath, fp, session, cwd) {
   try {
     const dir = join(tmpdir(), 'workflow-gate');
     mkdirSync(dir, { recursive: true });
@@ -230,8 +230,9 @@ async function openEditor(scriptPath, fp, session) {
     const server = join(dirname(fileURLToPath(import.meta.url)), 'approve-server.mjs');
     if (!existsSync(server)) return null;
 
-    // The session id scopes the live view's run lookup to this session first (see approve-server).
-    spawn(process.execPath, [server, nonce, portFile, scriptPath, String(session || '')],
+    // The session id scopes the live view's run lookup to this session first (see approve-server);
+    // the cwd is where the project's agent definitions live, for the agent-type advice.
+    spawn(process.execPath, [server, nonce, portFile, scriptPath, String(session || ''), String(cwd || '')],
       { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 
     // The server binds an ephemeral port and writes it here, usually well under a second. Sleep
@@ -366,7 +367,8 @@ if (mode === 'pre-tool') {
     let editorPath = ti.scriptPath || null, editor = null, approvedEdit = false;
     if (!process.env.WORKFLOW_GATE_NO_UI && content) {
       try { if (!editorPath) ({ path: editorPath, approvedEdit } = persistInline(content, input.cwd, fp)); } catch { editorPath = null; }
-      if (editorPath && !approvedEdit) editor = await openEditor(editorPath, fp, input.session_id);
+      // The project root, not the cwd: a session that cd'd into a subfolder still has its project's agents.
+      if (editorPath && !approvedEdit) editor = await openEditor(editorPath, fp, input.session_id, process.env.CLAUDE_PROJECT_DIR || input.cwd);
     }
     if (approvedEdit) {
       emit({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason:
@@ -770,6 +772,65 @@ if (mode === 'selftest') {
     const bad = requestFor({ agents: [{ id: 'kind', mission: 'x' }, { id: '__proto__', mission: 'x' }, { id: 'a7', mission: 'x' }] });
     eq(Object.keys(bad.questions).join(), 'kind,stakes,a7,a7_fx', 'ids outside aN cannot shadow a question or the prototype');
     eq(bad.questions.kind.type, 'choice', 'the kind question survives an agent named kind');
+    // Tool routing: the agent-type catalog is read locally, and Jev's pick is checked against it.
+    {
+      const { agentTypes, NO_TYPE } = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'advise.mjs')).href);
+      const root = join(tmpdir(), 'wg-selftest-types-' + process.pid), proj = join(root, 'p'), pa = join(proj, '.claude', 'agents'), pl = join(root, 'plugin-agents');
+      mkdirSync(pa, { recursive: true }); mkdirSync(pl, { recursive: true });
+      const put = (dir, f, t) => writeFileSync(join(dir, f), t);
+      put(pa, 'a.md', '---\nname: (@_@) engineer\ndescription: "Feasibility review"\ntools: Read, Grep\n---\nbody');
+      put(pa, 'b.md', '---\nname: plain\ndescription: no tools line\n---\n');
+      put(pa, 'c.md', '---\ndescription: no name, so not in the registry\n---\n');
+      put(pa, 'd.md', "---\nname: it's\ndescription: a quote cannot be spliced\n---\n");
+      put(pa, 'e.md', '---\nname: folded\ndescription: >-\n  first line\n  second line\ntools:\n  - Read\n  - Write\n---\n');
+      put(pa, 'f.md', '---\nname: __proto__\ndescription: harmless as data\n---\n');
+      put(pa, 'g.txt', '---\nname: notmd\ndescription: x\n---\n');
+      put(pl, 'review.md', '---\nname: review\ndescription: Scores findings with Jev\ntools: Read, Bash\nskills:\n  - typesafe:typesafe-ai\n---\n');
+      const plugins = [{ plugin: 'wg', dir: pl }, { plugin: 'wg', dir: pl }];
+      try {
+        const cat = agentTypes(proj, plugins), by = Object.fromEntries(cat.map((t) => [t.name, t]));
+        eq(cat[0].name, NO_TYPE, '(none) leads the catalog');
+        eq(['general-purpose', 'Explore', 'Plan'].every((n) => by[n]?.source === 'built-in'), true, 'built-ins are offered');
+        eq(by['wg:review']?.source === 'plugin' && by['wg:review'].tools === 'Read, Bash', true, 'a plugin agent is named <plugin>:<name>, as the registry lists it');
+        eq(cat.filter((t) => t.name === 'wg:review').length, 1, 'the same plugin agent read twice is offered once');
+        eq(by['(@_@) engineer']?.source === 'project' && by['(@_@) engineer'].tools === 'Read, Grep' && by['(@_@) engineer'].description === 'Feasibility review', true, 'registry names are verbatim, quotes stripped');
+        eq(by.folded?.description === 'first line second line' && by.folded.tools === 'Read, Write', true, 'folded description and tool list');
+        eq(by.plain.tools, 'all tools', 'no tools: line inherits every tool');
+        eq(!cat.some((t) => t.name === "it's" || t.name === 'notmd' || /no name/.test(t.description)), true, 'unnamed, unspliceable and non-.md files are skipped');
+        eq(Object.getPrototypeOf(requestFor({ agents: [{ id: 'a0', mission: 'x' }] }, cat).questions.a0_type.criteria), Object.prototype, 'a __proto__ agent is a key, not a prototype');
+        eq(agentTypes(null, []).map((t) => t.source).join(), 'built-in,built-in,built-in,built-in', 'no project, no plugins: built-ins only — ~/.claude/agents is not read');
+        const tq = requestFor({ agents: [{ id: 'a0', mission: 'x' }] }, cat);
+        eq(Object.keys(tq.questions).join(), 'kind,stakes,a0,a0_fx,a0_type', 'one type choice per agent, same request');
+        eq(tq.questions.a0_type.type === 'choice' && /Tools: Read, Grep/.test(tq.questions.a0_type.criteria['(@_@) engineer']), true, 'criteria carry each type\'s tools');
+        const tv = adviceFrom({ a0_type: { choice: 'Explore', confidence: 0.9 }, a1_type: { choice: NO_TYPE, confidence: 0.8 },
+          a2_type: { choice: 'rm -rf', confidence: 1 } }, skel, cat);
+        eq(tv.types.a0.type === 'Explore' && tv.types.a0.source === 'built-in', true, 'a known type is kept with its source');
+        eq(tv.types.a1.type, null, '(none) means no agentType');
+        eq(tv.types.a2, undefined, 'a choice outside the catalog is dropped');
+        eq(adviceFrom({ a0_type: { choice: 'Plan', confidence: 0.3 } }, skel, cat).types.a0.low, true, 'low confidence is flagged, never a type');
+        const hes = adviceFrom({ a0_type: { choice: NO_TYPE, confidence: 0.45, probabilities: { [NO_TYPE]: 0.49, 'wg:review': 0.37, 'rm -rf': 0.9, Plan: 0.04, Explore: 'x' } } }, skel, cat).types.a0;
+        eq(JSON.stringify(hes.alts), JSON.stringify([{ type: null, p: 0.49 }, { type: 'wg:review', p: 0.37 }]), 'low confidence names the two likeliest catalog types, (none) as null');
+        eq(by['wg:review'].skills.join(), 'typesafe:typesafe-ai', 'a type carries the skills it preloads');
+        eq(by.plain.skills.length, 0, 'no skills: line, no preloads');
+        {
+          const p2 = join(root, 'p2'), a2 = join(p2, '.claude', 'agents');
+          mkdirSync(a2, { recursive: true });
+          put(a2, 'explore.md', '---\nname: Explore\ndescription: the project\'s own explorer\ntools: Read\n---\n');
+          put(a2, 'x.md', '---\nname: narrowed\ndescription: x\ntools: Read, Skill, Bash\ndisallowedTools: Skill\n---\n');
+          put(a2, 'y.md', '---\nname: open\ndescription: y\ndisallowedTools:\n  - Write\n  - Edit\n---\n');
+          const c2 = agentTypes(p2, []), b2 = Object.fromEntries(c2.map((t) => [t.name, t]));
+          eq(c2[0].name === NO_TYPE && b2.Explore.source === 'project' && b2.Explore.tools === 'Read', true, 'a project agent named like a built-in wins, as in Claude Code; (none) stays first');
+          eq(c2.filter((t) => t.name === 'Explore').length, 1, 'the shadowed built-in is not offered twice');
+          eq(b2.narrowed.tools, 'Read, Bash', 'disallowedTools is taken out of an explicit tool list');
+          eq(b2.open.tools, 'all tools except Write, Edit', 'disallowedTools on inherited tools reads as "all tools except"');
+        }
+        eq(Object.keys(adviceFrom({ a0_type: { choice: 'Plan', confidence: 0.9 } }, skel).types).length, 0, 'no catalog, no type advice');
+        const own = agentTypes(null, [{ plugin: 'workflow-gate', dir: join(dirname(fileURLToPath(import.meta.url)), '..', 'agents') }]).map((t) => t.name);
+        eq(['dev', 'review', 'synthesis', 'verify', 'debug', 'research', 'judge'].every((n) => own.includes('workflow-gate:' + n)), true, 'the package ships its seven agent types');
+        for (let i = 0; i < 40; i++) put(pa, `z${i}.md`, `---\nname: z${i}\ndescription: filler\n---\n`);
+        eq(agentTypes(proj, plugins).length, 32, 'the catalog is capped for one single-stage choice');
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
   }
   // Post-run outcome check (G10): thresholds in code, opt-in twice, verdicts aligned with the cost cache.
   {

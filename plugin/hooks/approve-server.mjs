@@ -24,7 +24,7 @@ import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, copyFileSync, readdirSync, statSync, existsSync, openSync, readSync, closeSync } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { execFileSync, execFile } from 'node:child_process';
-import { join, dirname, resolve, basename } from 'node:path';
+import { join, dirname, resolve, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -32,11 +32,13 @@ import { fileURLToPath } from 'node:url';
 // small priors index the history daemon precomputes. The cost CACHE — the thing that walks 200 MB of
 // transcripts — stays out of the gate process on purpose.
 import { costOf, addEntry, priceOf, priorsFor } from './cost.mjs';
-import { askJev } from './advise.mjs';
+import { askJev, agentTypes } from './advise.mjs';
 
-const [, , nonce, portFile, scriptPath, sessionArg] = process.argv;
+const [, , nonce, portFile, scriptPath, sessionArg, cwdArg] = process.argv;
 // The calling session: its run directory is looked for there first. One path segment or nothing.
 const SESSION = /^[\w-]+$/.test(sessionArg || '') ? sessionArg : null;
+// The session's cwd, for <project>/.claude/agents in the agent-type catalog. Absent: user + built-ins.
+const PROJECT = cwdArg && isAbsolute(cwdArg) ? cwdArg : null;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GATE = join(HERE, 'workflow-plan-gate.mjs');
 const PROJECTS = join(homedir(), '.claude', 'projects');
@@ -157,10 +159,11 @@ const server = createServer((req, res) => {
         'application/json; charset=utf-8');
     }
 
-    // Intent + model routing on Jev. The editor posts the skeleton IT extracted (no second parser
-    // here); the key stays in this process. POST, so the Origin check above applies: only the page
-    // can trigger egress of mission text. Advice only — nothing here touches `decided`. A repeat of
-    // the exact payload (a retry, an undo) is served from ADVICE_CACHE without calling Jev.
+    // Intent, model and agent-type routing on Jev. The editor posts the skeleton IT extracted (no
+    // second parser here); the key stays in this process. POST, so the Origin check above applies:
+    // only the page can trigger egress of mission text and agent-type descriptions. Advice only —
+    // nothing here touches `decided`. A repeat of the exact payload (a retry, an undo) is served
+    // from ADVICE_CACHE without calling Jev. The catalog is re-read per ask: an edited definition shows.
     if (url.pathname === '/advice' && req.method === 'POST') {
       if (!process.env.TYPESAFE_API_KEY) return send(200, JSON.stringify({ available: false }), 'application/json; charset=utf-8');
       let body = '';
@@ -169,11 +172,14 @@ const server = createServer((req, res) => {
         try {
           const skel = JSON.parse(body);
           if (!Array.isArray(skel.agents)) return send(400, 'no agents');
-          const advice = await askJev(skel, ADVICE_CACHE);
+          const types = agentTypes(PROJECT);
+          const advice = await askJev(skel, ADVICE_CACHE, types);
           // Per-token input price per tier, from the one price table, so the page can say what a
           // suggested tier is worth without keeping a second copy that drifts.
           const prices = Object.fromEntries(['haiku', 'sonnet', 'opus', 'fable'].map((t) => [t, priceOf(t)?.in ?? null]));
-          send(200, JSON.stringify(advice ? { available: true, ...advice, prices } : { available: false }), 'application/json; charset=utf-8');
+          // The catalog without descriptions: enough for the page to show the tools of a type already written.
+          const catalog = types.map(({ name, tools, skills, source }) => ({ name, tools, skills, source }));
+          send(200, JSON.stringify(advice ? { available: true, ...advice, prices, catalog } : { available: false }), 'application/json; charset=utf-8');
         } catch (e) { send(500, String(e.message)); }
       });
       return;
